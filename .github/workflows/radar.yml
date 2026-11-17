@@ -8,6 +8,10 @@ on:
     - cron: "2-59/5 * * * *"  # every 5 min at :02, :07, ... (off the busy round minutes; GitHub can still be late)
     - cron: "17 3 * * 1"    # weekly keep-alive (Monday 08:47 IST), see the keepalive job
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "once (normal check) or reel-test (make a test news Reel, preview only)"
+        default: "once"
 
 permissions:
   contents: read
@@ -20,7 +24,7 @@ concurrency:
 jobs:
   check:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 20   # making + hosting a Reel takes a few minutes
     permissions:
       contents: write   # only to put pictures for scheduled posts on the "media" branch
     steps:
@@ -43,6 +47,9 @@ jobs:
           ssh-key: ${{ secrets.ASSETS_DEPLOY_KEY }}
           path: assets/Official
 
+      - name: ffmpeg for Reels
+        run: command -v ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+
       - name: Bold font for the cards
         run: |
           test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf || \
@@ -62,7 +69,10 @@ jobs:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
-        run: python radar.py --once
+          MODE: ${{ github.event.inputs.mode }}
+        # only two allowed values - the input never reaches the shell as code
+        run: |
+          if [ "$MODE" = "reel-test" ]; then python radar.py --reel-test; else python radar.py --once; fi
 
       - name: Save seen items
         if: always()

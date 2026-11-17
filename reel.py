@@ -111,6 +111,8 @@ def headline_overlay(spec: dict, s: R.Settings, fonts: R.Fonts, path: Path) -> N
         for line in lines:
             _text(draw, (W // 2, y), line, f, color)
             y += lh
+    if spec.get("source_line"):  # "Reported by IGN" / "Source: callofduty.com" - always credit the source
+        _text(draw, (W // 2, y + 18), spec["source_line"], fonts.get("bold", 30), (205, 210, 216))
     img.save(path)
 
 
@@ -165,12 +167,98 @@ def end_card(spec: dict, s: R.Settings, fonts: R.Fonts, still: Image.Image, path
     bg.save(path)
 
 
+# --------------------------------------------------------------------------- automatic news Reels (cloud)
+
+TOPICS = ["lucia", "jason", "vice city", "leonida keys", "grassrivers", "beach", "hajin", "zodiac", "warzone",
+          "dmz", "x01", "shoot house", "backstab", "killblock", "canyon", "ghost"]
+
+
+def library() -> dict | None:
+    for root in (R.ASSETS_DIR, BASE / ".asset_sync"):
+        p = root / "reels" / "library.json"
+        if p.exists():
+            return json.loads(p.read_text(encoding="utf-8"))
+    return None
+
+
+def fact_chunks(summary: str, n: int = 3, width: int = 62) -> list[str]:
+    """The article's own words, in short on-screen pieces (never reworded): the first sentences, cut at
+    commas / 'and' / 'with' so each piece reads as a phrase (max ~2 lines)."""
+    import re as _re
+    out = []
+    for sent in _re.split(r"(?<=[.!?])\s+", (summary or "").strip())[:2]:
+        parts = [p for p in _re.split(r",\s+|;\s+|\s+-\s+", sent.strip().rstrip(".!?")) if p]
+        for part in parts:
+            while len(part) > width:  # break long clauses before 'and'/'with'/'as'/'while', else at a word
+                cut = max((m.start() for m in _re.finditer(r"\s(?:and|with|as|while|for|in)\s", part[:width + 1])
+                           if m.start() > 18), default=part.rfind(" ", 0, width))
+                out.append(part[:cut].strip())
+                part = part[cut:].strip()
+            out.append(part)
+    return [c for c in out if len(c) > 3][:n]
+
+
+def news_spec(item: dict, d: dict) -> dict | None:
+    """Plan a news Reel from a story: an action opener, then shots that match the story's topic
+    (Hajin story -> Hajin footage), the headline first, the article's facts on later shots, a question."""
+    import random
+    import re as _re
+    lib = library()
+    if not lib:
+        return None
+    game = item["game"]
+    text = " " + _re.sub(r"[^a-z0-9 ]+", " ", f"{item['title']} {d.get('summary', '')}".lower()) + " "
+    topics = {t for t in TOPICS if f" {t} " in text}
+    pool = [(vk, sh) for vk, v in lib["videos"].items() if v["game"] == game for sh in v["shots"]]
+    if len(pool) < 6:
+        return None
+    rng = random.Random(item.get("url", item["title"]))
+    pool.sort(key=lambda x: (-len(set(x[1]["tags"]) & topics), rng.random()))
+    # opener: the most dramatic moving shot ("hero"), preferably one that matches the story
+    opener = next((x for x in pool if "hero" in x[1]["tags"]), None) or         next((x for x in pool if "action" in x[1]["tags"]), pool[0])
+    chosen, total = [opener], opener[1]["dur"]
+    for x in pool:
+        if total >= 11.5:
+            break
+        if x is not opener:
+            chosen.append(x)
+            total += x[1]["dur"]
+    facts, t, shots = fact_chunks(d.get("summary", "")), 0.0, []
+    for vk, sh in chosen:
+        shot = {"clip": sh["clip"], "dur": sh["dur"]}
+        if t >= HEADLINE_SECONDS - 0.01 and facts:
+            shot["caption"] = facts.pop(0)
+        shots.append(shot)
+        t += sh["dur"]
+    label = R.GAME_LABEL.get(game, "")
+    return {
+        "game": game, "tier": item["tier"], "source": item["source"],
+        "headline": d.get("full_headline") or d["headline"],
+        "source_line": f"Reported by {item['source']}" if item["tier"] == "REPORTED" else f"Source: {item['source']}",
+        "banner": f"{label} · {'BREAKING' if item.get('priority') == 'HIGH' else 'NEWS'}",
+        "question": "Hyped or not?",
+        "audio": {"clip": lib["videos"][opener[0]]["audio"]},
+        "shots": shots, "caption": d.get("caption", ""),
+        "series": "The Lobby Daily", "title": item["title"][:80],
+    }
+
+
 # --------------------------------------------------------------------------- build
 
 def build(spec_path: Path) -> Path:
-    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    return build_spec(json.loads(spec_path.read_text(encoding="utf-8")), spec_path.stem)
+
+
+def _clip_path(rel: str) -> Path:
+    """A prepared library clip: in the cloud under assets/Official, on the PC also in .asset_sync."""
+    for root in (R.ASSETS_DIR, BASE / ".asset_sync"):
+        if (root / rel).exists():
+            return root / rel
+    raise FileNotFoundError(rel)
+
+
+def build_spec(spec: dict, name: str) -> Path:
     s, fonts = R.Settings(), R.Fonts()
-    name = spec_path.stem
     out_dir = R.DRAFTS_DIR / "reels" / name
     out_dir.mkdir(parents=True, exist_ok=True)
     tmp = Path(tempfile.mkdtemp(prefix="reel_"))
@@ -188,8 +276,9 @@ def build(spec_path: Path) -> Path:
         if sh.get("caption"):
             caption_overlay(sh["caption"], s, fonts, tmp / f"cap{i}.png")
     last = shots[-1]
-    last_src = R.ASSETS_DIR / last["file"]
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{last['start'] + last['dur'] / 2:.2f}", "-i", str(last_src),
+    last_src = _clip_path(last["clip"]) if last.get("clip") else R.ASSETS_DIR / last["file"]
+    last_t = last["dur"] / 2 if last.get("clip") else last["start"] + last["dur"] / 2
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{last_t:.2f}", "-i", str(last_src),
                     "-frames:v", "1", str(tmp / "last.png")], check=True)
     end_card(spec, s, fonts, Image.open(tmp / "last.png"), tmp / "end.png")
 
@@ -197,6 +286,12 @@ def build(spec_path: Path) -> Path:
     cmd = ["ffmpeg", "-v", "error", "-y"]
     filters, labels = [], []
     for i, sh in enumerate(shots):
+        if sh.get("clip"):  # prepared library clip: already vertical 1080x1920, just join it
+            cmd += ["-t", f"{sh['dur']:.3f}", "-i", str(_clip_path(sh["clip"]))]
+            filters.append(f"[{i}:v]scale={W}:{H},setsar=1,fps={FPS},trim=duration={sh['dur']:.3f},"
+                           f"setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
+            labels.append(f"[v{i}]")
+            continue
         src = R.ASSETS_DIR / sh["file"]
         sw, shh, _ = _probe(src)
         top, hf = _active_area(src)
@@ -232,6 +327,8 @@ def build(spec_path: Path) -> Path:
     audio = spec.get("audio") or {}
     if audio.get("music"):
         cmd += ["-ss", f"{audio.get('start', 0):.3f}", "-t", f"{total:.3f}", "-i", str(BASE / "assets" / "Music" / audio["music"])]
+    elif audio.get("clip"):
+        cmd += ["-t", f"{total:.3f}", "-i", str(_clip_path(audio["clip"]))]
     else:
         cmd += ["-ss", f"{audio.get('start', shots[0]['start']):.3f}", "-t", f"{total:.3f}",
                 "-i", str(R.ASSETS_DIR / audio.get("file", shots[0]["file"]))]
@@ -240,7 +337,8 @@ def build(spec_path: Path) -> Path:
 
     reel = out_dir / "reel.mp4"
     cmd += ["-filter_complex", ";".join(filters), "-map", cur, "-map", "[aout]",
-            "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "high", "-pix_fmt", "yuv420p",
+            "-c:v", "libx264", "-preset", "medium", "-crf", "21", "-maxrate", "8M", "-bufsize", "16M",
+            "-profile:v", "high", "-pix_fmt", "yuv420p",
             "-r", str(FPS), "-c:a", "aac", "-b:a", "160k", "-ar", "48000", "-movflags", "+faststart",
             "-t", f"{total:.3f}", str(reel)]
     subprocess.run(cmd, check=True)

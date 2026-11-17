@@ -805,7 +805,7 @@ def split_headline(title: str) -> tuple[str, str]:
     t = " ".join(title.split())
     for sep in (": ", " — ", " – ", " - "):
         if sep in t:
-            a, b = t.split(sep, 1)
+            a, b = t.rsplit(sep, 1)  # "Call of Duty: Warzone Season 1: Hajin is live" -> split at the last one
             if len(a.split()) >= 2 and len(b.split()) >= 2:
                 return a.strip(), b.strip()
     words = t.split()
@@ -1540,6 +1540,7 @@ def run_loop(radar: Radar) -> int:
                 safe_retry(radar)
             maybe_digest(radar)
             autopost.tick(radar)
+            report.tick(radar)
         except Exception:
             log.exception("Error during the check loop (continuing)")
         time.sleep(20)
@@ -1638,6 +1639,7 @@ def main() -> int:
     mode.add_argument("--test", action="store_true", help="send a test Telegram message + sample draft")
     mode.add_argument("--digest", action="store_true", help="send today's LOW items summary")
     mode.add_argument("--ig-check", action="store_true", help="test auto-posting setup (posts nothing)")
+    mode.add_argument("--reel-test", action="store_true", help="make a test news Reel and send it as a preview")
     args = parser.parse_args()
 
     setup_logging()
@@ -1645,6 +1647,8 @@ def main() -> int:
     radar = Radar(s)
     if args.ig_check:
         return autopost.check_setup(radar)
+    if args.reel_test:
+        return autopost.reel_test(radar)
     if args.test:
         return run_test(radar)
     if args.digest:
@@ -1662,6 +1666,7 @@ def main() -> int:
         if s.cloud:
             maybe_digest(radar)  # no --loop in the cloud, so the daily digest is sent from here
             autopost.tick(radar)  # again, so news found in this run can be offered
+            report.tick(radar)    # 24-hour results + the 21:00 IST daily report
         print_table(results)
         return 0
     return run_loop(radar)
@@ -1671,6 +1676,7 @@ if __name__ == "__main__":
     # autopost.py does "import radar": make that this same module, not a second copy of it.
     sys.modules.setdefault("radar", sys.modules["__main__"])
     import autopost
+    import report
 
     try:
         sys.exit(main())

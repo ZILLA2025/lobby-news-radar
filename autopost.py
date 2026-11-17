@@ -23,6 +23,7 @@ import base64
 import hashlib
 import json
 import math
+import shutil
 import os
 import time
 import uuid
@@ -579,6 +580,51 @@ class AutoPost:
         caption = (folder / "caption.txt").read_text(encoding="utf-8").split(AI_MARK)[0].strip()
         return ig_ready_jpeg((folder / "card.png").read_bytes(), R.hex_rgb(self.s.bg)), caption
 
+    def _news_reel(self, row) -> tuple[str, str, str, str] | None:
+        """A news Reel made in the cloud from the shot library (CLAUDE.md: 75% Reels). None -> use the card."""
+        try:
+            import reel as RL
+        except Exception:
+            return None
+        if not RL.library() or not shutil.which("ffmpeg") or row["tier"] == "RUMOR":
+            return None
+        item = {
+            "source": row["source"], "tier": row["tier"], "game": row["game"], "priority": row["priority"],
+            "title": row["title"], "url": row["url"], "summary": row["summary"] or "",
+            "published": R.from_iso(row["published"]), "found_at": R.from_iso(row["found_at"]),
+        }
+        d = R.make_draft(item, self.s, self.radar.fonts)
+        spec = RL.news_spec(item, d)
+        if not spec:
+            return None
+        name = f"news-{row['id']}-{uuid.uuid4().hex[:8]}"
+        path = RL.build_spec(spec, name)
+        video_url, _ = self.host.upload(path.read_bytes(), f"{name}.mp4")
+        cover_url, _ = self.host.upload((path.parent / "cover.jpg").read_bytes(), f"{name}-cover.jpg")
+        caption = (d["folder"] / "caption.txt").read_text(encoding="utf-8").split(AI_MARK)[0].strip()
+        return video_url, cover_url, caption, name
+
+    def propose_breaking(self) -> None:
+        """HIGH official/reported news found in the last 20 min -> a Reel draft right away (CLAUDE.md 6:
+        'send it for approval within 10 minutes'), planned for the next posting time. One per run."""
+        q = ",".join("?" * len(self.cfg.tiers)) or "''"
+        row = self.db.execute(
+            f"SELECT * FROM items WHERE tier IN ({q}) AND priority='HIGH' AND game IS NOT NULL AND status IN {NEWS_STATUSES}"
+            " AND found_at > ? AND id NOT IN (SELECT ref FROM posts WHERE kind='news' AND ref IS NOT NULL)"
+            " ORDER BY found_at DESC LIMIT 1", (*self.cfg.tiers, R.iso(self.now() - timedelta(minutes=20)))).fetchone()
+        if row:
+            key = self._next_free_slot(self.now())
+            if key:
+                self._propose_row(key, "news", row, breaking=True)
+
+    def _next_free_slot(self, after: datetime) -> str | None:
+        for key, dt in self.slots():
+            if dt > after and not self.db.execute(
+                    "SELECT 1 FROM posts WHERE slot=? AND status IN ('approved','publishing','posted') LIMIT 1",
+                    (key,)).fetchone():
+                return key
+        return None
+
     # ---- planned posts (Reels made ahead for a slot, or for the standby bank)
     def _plans(self) -> list[dict]:
         """planned/*.json from the private assets repo (cloud: assets/Official/planned; PC: .asset_sync/planned)."""
@@ -631,37 +677,50 @@ class AutoPost:
             order.insert(0, ("rumor", self._rumor_candidates(key)))
         for kind, rows in order:
             for row in rows:
-                try:
-                    if kind in ("news", "rumor"):
-                        data, caption = self._news_picture(row)
-                        name = f"{kind}-{row['id']}-{uuid.uuid4().hex[:8]}.jpg"
-                        url, sha = self.host.upload(data, name)
-                        if kind == "news":
-                            label = f"NEWS · {row['tier']} · {R.GAME_LABEL.get(row['game'], '')} · {row['priority']}"
-                        else:
-                            label = (f"⚠️ WEEKLY {R.RUMOR_LABEL} · {R.GAME_LABEL.get(row['game'], '')} · "
-                                     f"traction {row['traction']} (top on Reddit this week)\n"
-                                     "Unconfirmed: labelled as a rumor on the card and in the caption")
-                    else:
-                        caption, name, url, sha = row["caption"] or "", row["image_name"], row["image_url"], row["image_sha"]
-                        label = f"FROM YOUR QUEUE (#{row['id']})"
-                except Exception as e:
-                    log.exception("Could not prepare %s #%s for the %s post: %s", kind, row["id"], key, e)
-                    if kind in ("news", "rumor"):  # don't try this one again
-                        self.db.execute("INSERT INTO posts(slot, kind, ref, status, error, created_at) VALUES(?,?,?,?,?,?)",
-                                        (key, kind, row["id"], "failed", str(e)[:300], R.iso(self.now())))
-                    continue
-                cur = self.db.execute(
-                    "INSERT INTO posts(slot, kind, ref, caption, image_name, image_url, image_sha, status, created_at,"
-                    " updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
-                    (key, kind, row["id"], caption, name, url, sha, "proposed", R.iso(self.now()), R.iso(self.now())),
-                )
-                pid = cur.lastrowid
-                msg_id = self._send_proposal(pid, key, label, caption, url)
-                self._update_post(pid, tg_msg=msg_id)
-                log.info("Asked for approval: %s post = %s #%s", key, kind, row["id"])
-                return True
+                if self._propose_row(key, kind, row):
+                    return True
         return False
+
+    def _propose_row(self, key: str, kind: str, row, breaking: bool = False) -> bool:
+        media, cover = "IMAGE", ""
+        try:
+            reel_made = self._news_reel(row) if kind == "news" else None
+            if reel_made:
+                url, cover, caption, name = reel_made
+                sha, media = None, "REELS"
+                label = f"🎬 NEWS REEL · {row['tier']} · {R.GAME_LABEL.get(row['game'], '')} · {row['priority']}"
+            elif kind in ("news", "rumor"):
+                data, caption = self._news_picture(row)
+                name = f"{kind}-{row['id']}-{uuid.uuid4().hex[:8]}.jpg"
+                url, sha = self.host.upload(data, name)
+                if kind == "news":
+                    label = f"NEWS · {row['tier']} · {R.GAME_LABEL.get(row['game'], '')} · {row['priority']}"
+                else:
+                    label = (f"⚠️ WEEKLY {R.RUMOR_LABEL} · {R.GAME_LABEL.get(row['game'], '')} · "
+                             f"traction {row['traction']} (top on Reddit this week)\n"
+                             "Unconfirmed: labelled as a rumor on the card and in the caption")
+            else:
+                caption, name, url, sha = row["caption"] or "", row["image_name"], row["image_url"], row["image_sha"]
+                label = f"FROM YOUR QUEUE (#{row['id']})"
+            if breaking:
+                label = "🚨 BREAKING - " + label
+        except Exception as e:
+            log.exception("Could not prepare %s #%s for the %s post: %s", kind, row["id"], key, e)
+            if kind in ("news", "rumor"):  # don't try this one again
+                self.db.execute("INSERT INTO posts(slot, kind, ref, status, error, created_at) VALUES(?,?,?,?,?,?)",
+                                (key, kind, row["id"], "failed", str(e)[:300], R.iso(self.now())))
+            return False
+        cur = self.db.execute(
+            "INSERT INTO posts(slot, kind, ref, caption, image_name, image_url, image_sha, status, created_at,"
+            " updated_at, media_type, cover_url) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            (key, kind, row["id"], caption, name, url, sha, "proposed", R.iso(self.now()), R.iso(self.now()),
+             media, cover),
+        )
+        pid = cur.lastrowid
+        msg_id = self._send_proposal(pid, key, label, caption, url, media)
+        self._update_post(pid, tg_msg=msg_id)
+        log.info("Asked for approval: %s post = %s #%s (%s)", key, kind, row["id"], media)
+        return True
 
     def _send_proposal(self, pid: int, key: str, label: str, caption: str, url: str,
                        media_type: str = "IMAGE") -> int | None:
@@ -746,6 +805,10 @@ class AutoPost:
                                  "Check Instagram: if it's not there, post it by hand.")
             if not (ask_at <= now <= end):
                 continue
+            planned = self._planned_candidates(key)
+            if planned and now < dt:  # the Reel made for this slot is offered even if breaking news came first
+                self._propose_plan(key, planned[0])
+                rows = self.db.execute("SELECT * FROM posts WHERE slot=?", (key,)).fetchall()
             if not rows:
                 if not self.propose(key):
                     self.db.execute("INSERT INTO posts(slot, kind, status, created_at) VALUES(?,?,?,?)",
@@ -851,6 +914,13 @@ class AutoPost:
             self._set_buttons(row["tg_msg"], "⏭ Not used")
             return
         if action == "ok":
+            taken = self.db.execute("SELECT 1 FROM posts WHERE slot=? AND id!=? AND status IN ('approved','publishing',"
+                                    "'posted') LIMIT 1", (key, row["id"])).fetchone()
+            if taken:  # one post per posting time: this one moves to the next free time
+                nxt = self._next_free_slot(self.slot_dt(key))
+                if nxt:
+                    self._update_post(row["id"], slot=nxt)
+                    key, t = nxt, self.label(nxt)
             self._update_post(row["id"], status="approved")
             when = "posting now" if self.now() >= self.slot_dt(key) else f"posts at {t}"
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": f"Approved - {when}"}, quiet=True)
@@ -991,6 +1061,7 @@ def tick(radar: R.Radar) -> None:
         ap.process_updates()
         ap.run_slots()
         ap.propose_standby()
+        ap.propose_breaking()
         ap.tokens.maybe_refresh()
     except Exception:
         log.exception("Auto-posting error (the news radar keeps running)")
@@ -1048,4 +1119,26 @@ def check_setup(radar: R.Radar) -> int:
     finally:
         ap.host.delete(name, sha)
     print("\nAll good - auto-posting is ready." if ok else "\nSomething needs fixing - see FAIL above.")
+    return 0 if ok else 1
+
+
+def reel_test(radar: R.Radar) -> int:
+    """--reel-test: make a news Reel from the latest real official/reported story and send it to Telegram as a
+    PREVIEW (no buttons, nothing is posted). Checks the cloud can render and host Reels."""
+    ap = _get(radar)
+    q = ",".join("?" * len(ap.cfg.tiers)) or "''"
+    row = ap.db.execute(f"SELECT * FROM items WHERE tier IN ({q}) AND game IS NOT NULL AND status IN {NEWS_STATUSES}"
+                        " ORDER BY CASE priority WHEN 'HIGH' THEN 0 WHEN 'MEDIUM' THEN 1 ELSE 2 END, found_at DESC LIMIT 1",
+                        tuple(ap.cfg.tiers)).fetchone()
+    if not row:
+        print("no news item to test with")
+        return 1
+    made = ap._news_reel(row)
+    if not made:
+        print("could not make a Reel (library or ffmpeg missing)")
+        return 1
+    video_url, cover_url, caption, name = made
+    ok = ap.tg.api("sendVideo", {"video": video_url, "caption": ("🧪 TEST news Reel made in the cloud - preview only, "
+                                                                 "NOT for posting.\n\n" + caption)[:1024]})
+    print("sent" if ok else "Telegram send failed", video_url)
     return 0 if ok else 1
