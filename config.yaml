@@ -64,6 +64,12 @@ autopost:
   late_approval_minutes: 90    # approve up to this long after the time = posted right away
   news_tiers: ["OFFICIAL", "REPORTED"]   # news first; if none, the next post from your queue
   news_max_age_hours: 12       # only news found in the last 12 hours is offered
+  # Once a week the slot below offers the Reddit rumor with the most traction this week, labelled
+  # "RUMOR HEARD" (amber, text-only card, caption says it's NOT confirmed). Skip = normal news/queue.
+  weekly_rumor:
+    enabled: true
+    day: "Saturday"            # day in the posting time zone (New York)
+    time: "13:00"              # must be one of the times above
   github_repo: "ZILLA2025/lobby-news-radar"   # pictures are hosted here so Instagram can fetch them
   instagram_api_version: ""    # leave empty unless told otherwise
   instagram_user_id: "17841416229817413"   # @thelobby.report (from the Meta app dashboard)

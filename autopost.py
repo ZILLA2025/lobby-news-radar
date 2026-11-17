@@ -70,6 +70,7 @@ HELP = (
     "  ✅ Approve = it goes on Instagram at that time\n"
     "  ⏭ Skip = I show you the next option\n"
     "Nothing is ever posted without your ✅.\n\n"
+    "Saturdays 13:00 New York: the week's most-talked-about rumor, labelled RUMOR HEARD.\n\n"
     "Add your own post: send me a photo with the caption written under it.\n"
     "(Tip: send it as a File to keep full quality.)\n\n"
     "Commands:\n"
@@ -123,7 +124,15 @@ class APConfig:
         if self.sleep and None in self.sleep:
             self.sleep = None
         self.tiers = [str(x).upper() for x in (c.get("news_tiers") or ["OFFICIAL", "REPORTED"])]
-        self.tiers = [t for t in self.tiers if t != "RUMOR"]  # rumours are never posted
+        self.tiers = [t for t in self.tiers if t != "RUMOR"]  # rumors only via the weekly RUMOR HEARD post
+        w = c.get("weekly_rumor") or {}
+        days = ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
+        day = str(w.get("day", "")).strip().lower()
+        self.rumor_day = days.index(day) if w.get("enabled") and day in days else None
+        self.rumor_time = _hhmm(w.get("time", "13:00"), "autopost.weekly_rumor.time")
+        if self.rumor_day is not None and self.rumor_time not in self.times:
+            log.warning("autopost.weekly_rumor.time %s is not one of autopost.times - weekly rumor post off", self.rumor_time)
+            self.rumor_day = None
         self.api_version = str(c.get("instagram_api_version") or "").strip()
         self.ig_user_id = str(c.get("instagram_user_id") or "").strip()
         self.repo = os.getenv("GITHUB_REPOSITORY", "").strip() or str(c.get("github_repo") or "").strip()
@@ -489,6 +498,24 @@ class AutoPost:
         ).fetchall()
         return sorted(rows, key=lambda r: (PRIO_RANK.get(r["priority"], 3), -(R.from_iso(r["found_at"]).timestamp())))
 
+    def is_rumor_slot(self, key: str) -> bool:
+        if self.cfg.rumor_day is None:
+            return False
+        d, t = key.split(" ")
+        return t == self.cfg.rumor_time and datetime.fromisoformat(d).weekday() == self.cfg.rumor_day
+
+    def _rumor_candidates(self, key: str) -> list:
+        """The 3 rumors with the most traction in the last 7 days that were never offered before."""
+        offered = self.db.execute("SELECT COUNT(*) FROM posts WHERE kind='rumor' AND slot=?", (key,)).fetchone()[0]
+        if offered >= 3:  # after 3 skipped rumors: on to normal news / the queue
+            return []
+        return self.db.execute(
+            "SELECT * FROM items WHERE tier='RUMOR' AND game IS NOT NULL AND COALESCE(traction, 0) > 0"
+            " AND found_at > ? AND id NOT IN (SELECT ref FROM posts WHERE kind='rumor' AND ref IS NOT NULL)"
+            " ORDER BY traction DESC, found_at DESC LIMIT 3",
+            (R.iso(self.now() - timedelta(days=7)),),
+        ).fetchall()
+
     def _queue_candidates(self, key: str) -> list:
         return self.db.execute(
             "SELECT * FROM queue WHERE status='queued' AND id NOT IN"
@@ -503,7 +530,11 @@ class AutoPost:
                 "title": row["title"], "url": row["url"], "summary": row["summary"] or "",
                 "published": R.from_iso(row["published"]), "found_at": R.from_iso(row["found_at"]),
             }
-            d = R.make_draft(item, self.s, self.radar.fonts)
+            # Rumors: text-only card. Never fetch the Reddit post's picture (could be leaked footage).
+            meta = {"title": row["title"], "description": "", "image": "", "body": ""} if row["tier"] == "RUMOR" else None
+            if meta:
+                item["summary"] = ""
+            d = R.make_draft(item, self.s, self.radar.fonts, meta=meta)
             folder = d["folder"]
             self.db.execute("UPDATE items SET draft_dir=? WHERE id=?", (str(folder), row["id"]))
         caption = (folder / "caption.txt").read_text(encoding="utf-8").split(AI_MARK)[0].strip()
@@ -511,20 +542,28 @@ class AutoPost:
 
     def propose(self, key: str) -> bool:
         """Send the next option for this slot. False when there is nothing (left) to offer."""
-        for kind, rows in (("news", self._news_candidates(key)), ("queue", self._queue_candidates(key))):
+        order = [("news", self._news_candidates(key)), ("queue", self._queue_candidates(key))]
+        if self.is_rumor_slot(key):  # the weekly RUMOR HEARD post comes first, news/queue after a Skip
+            order.insert(0, ("rumor", self._rumor_candidates(key)))
+        for kind, rows in order:
             for row in rows:
                 try:
-                    if kind == "news":
+                    if kind in ("news", "rumor"):
                         data, caption = self._news_picture(row)
-                        name = f"news-{row['id']}-{uuid.uuid4().hex[:8]}.jpg"
+                        name = f"{kind}-{row['id']}-{uuid.uuid4().hex[:8]}.jpg"
                         url, sha = self.host.upload(data, name)
-                        label = f"NEWS · {row['tier']} · {R.GAME_LABEL.get(row['game'], '')} · {row['priority']}"
+                        if kind == "news":
+                            label = f"NEWS · {row['tier']} · {R.GAME_LABEL.get(row['game'], '')} · {row['priority']}"
+                        else:
+                            label = (f"⚠️ WEEKLY {R.RUMOR_LABEL} · {R.GAME_LABEL.get(row['game'], '')} · "
+                                     f"traction {row['traction']} (top on Reddit this week)\n"
+                                     "Unconfirmed: labelled as a rumor on the card and in the caption")
                     else:
                         caption, name, url, sha = row["caption"] or "", row["image_name"], row["image_url"], row["image_sha"]
                         label = f"FROM YOUR QUEUE (#{row['id']})"
                 except Exception as e:
                     log.exception("Could not prepare %s #%s for the %s post: %s", kind, row["id"], key, e)
-                    if kind == "news":  # don't try this one again
+                    if kind in ("news", "rumor"):  # don't try this one again
                         self.db.execute("INSERT INTO posts(slot, kind, ref, status, error, created_at) VALUES(?,?,?,?,?,?)",
                                         (key, kind, row["id"], "failed", str(e)[:300], R.iso(self.now())))
                     continue
@@ -589,7 +628,7 @@ class AutoPost:
         self.host.delete(row["image_name"], row["image_sha"])
 
     def _drop_news_picture(self, row) -> None:
-        if row["kind"] == "news":
+        if row["kind"] in ("news", "rumor"):
             self.host.delete(row["image_name"], row["image_sha"])
 
     # ---- one pass

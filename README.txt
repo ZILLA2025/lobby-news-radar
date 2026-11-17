@@ -223,7 +223,15 @@ How it works
   - Approved late (up to 90 minutes after the time)? It's posted right away.
   - "Nothing to post" message, then news comes in before the time? It's offered then
     (but never while you sleep).
-  - RUMOR items are never offered.
+  - Rumors are only offered ONCE A WEEK: Saturday 13:00 New York (asked Saturday 23:00 IST).
+    That post is the Reddit rumor with the most traction this week (how high it ranked in
+    r/GTA6 and r/CallOfDuty "top today", and for how long). It is clearly labelled:
+      * amber "RUMOR HEARD" label on the card (not the lime OFFICIAL one)
+      * text-only card - the Reddit picture is never used (could be leaked footage)
+      * caption starts "RUMOR HEARD:" and says it is NOT confirmed
+    Skip shows the 2nd and 3rd biggest rumors, then normal news / your queue.
+    Change or switch off: config.yaml > autopost > weekly_rumor.
+    The real-time rumor alerts stay "don't post as fact" - only this weekly post is labelled.
   - Each message shows both times, e.g. "16:00 New York (02:30 IST)".
   - In the cloud a tap is picked up at the next check, so give it up to ~10 minutes.
     GitHub's timer can also make a post go out a few minutes after the exact time.

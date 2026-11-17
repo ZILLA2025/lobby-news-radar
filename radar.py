@@ -55,6 +55,10 @@ RETRIES = 2
 GAME_LABEL = {"gta6": "GTA VI", "mw4": "MW4"}
 HASHTAGS = {"gta6": "#GTA6 #GTAVI #RockstarGames", "mw4": "#MW4 #CallofDuty #ModernWarfare4"}
 PRIORITY_EMOJI = {"HIGH": "🚨", "MEDIUM": "🔔", "LOW": "📰"}
+PUBLISHER = {"gta6": "Rockstar", "mw4": "Activision"}
+# Weekly rumor post (autopost): amber label so it can never be mistaken for OFFICIAL news.
+RUMOR_LABEL = "RUMOR HEARD"
+RUMOR_COLOR = "#FFB020"
 
 # Stop a broken/redesigned site from flooding the phone.
 MAX_ALERTS_PER_SOURCE = 5
@@ -164,7 +168,11 @@ CREATE INDEX IF NOT EXISTS idx_found ON items(found_at);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
 # Columns added after the first release (older radar.db files get them on start).
-MIGRATIONS = ["ALTER TABLE items ADD COLUMN summary TEXT"]
+MIGRATIONS = [
+    "ALTER TABLE items ADD COLUMN summary TEXT",
+    # RUMOR items: points for ranking high in Reddit's "top today" lists, every time they're seen there
+    "ALTER TABLE items ADD COLUMN traction INTEGER DEFAULT 0",
+]
 # status: seen (first-run baseline) | filtered (no keyword match) | duplicate (same title as
 # an earlier item) | pending (new, alert not delivered yet) | alerted | digest (LOW, waits for
 # the daily digest) | rumor_alerted
@@ -759,11 +767,11 @@ def draw_headline(img: Image.Image, x: int, y: int, lines, font, fill, fake_ital
 
 
 def draw_pill(draw, x: int, y: int, tier: str, font, accent, bg) -> None:
-    label = tier
+    label = RUMOR_LABEL if tier == "RUMOR" else tier
     pad_x, h = 22, 50
     w = text_w(draw, label, font) + pad_x * 2
     box = (x, y, x + w, y + h)
-    if tier == "OFFICIAL":
+    if tier in ("OFFICIAL", "RUMOR"):  # RUMOR: filled amber (accent is amber on rumor cards)
         draw.rounded_rectangle(box, radius=h // 2, fill=accent)
         color = bg
     else:
@@ -782,7 +790,7 @@ def time_label(published: datetime | None, found: datetime) -> str:
 def render(kind: str, out_path: Path, d: dict, s: Settings, fonts: Fonts, photo: Image.Image | None) -> None:
     """kind = 'card' (1080x1350 post) or 'story' (1080x1920, top 250 / bottom 300 left free)."""
     W, H = (1080, 1350) if kind == "card" else (1080, 1920)
-    bg, accent = hex_rgb(s.bg), hex_rgb(s.accent)
+    bg, accent = hex_rgb(s.bg), hex_rgb(RUMOR_COLOR if d["tier"] == "RUMOR" else s.accent)
     white, grey, dim = (255, 255, 255), (163, 169, 178), (120, 126, 135)
     img = Image.new("RGB", (W, H), bg)
     draw = ImageDraw.Draw(img)
@@ -884,6 +892,12 @@ def download_image(url: str, dest: Path) -> Image.Image | None:
 
 def build_caption(d: dict) -> str:
     headline = d["caption_headline"].rstrip()
+    if d["tier"] == "RUMOR":  # weekly rumor post: never written as fact
+        where = re.sub(r"\s*\(.*\)$", "", d["source"])
+        return (f"👀 {RUMOR_LABEL}: {headline}\n\n"
+                f"This is NOT confirmed. It's the rumor getting the most attention this week ({where} on Reddit). "
+                f"Treat it as a rumor until {PUBLISHER.get(d['game'], 'the studio')} says otherwise.\n\n"
+                f"Real or fake? Tell us 👇\n\n{HASHTAGS[d['game']]}\n")
     if headline and headline[-1] not in ".!?…":
         headline += "."
     first = f"{headline} {d['summary']}".strip()
@@ -1168,6 +1182,14 @@ class Radar:
             if row_id:
                 it["id"] = row_id
                 new_items.append(it)
+
+        if src["tier"] == "RUMOR":
+            # Traction: #1 in today's top list = 10 points per check, #10 = 1 point. Staying high for
+            # hours adds up, so the weekly "RUMOR HEARD" post picks what people talked about most.
+            for rank, it in enumerate(items, 1):
+                if rank <= 10:
+                    self.db.execute("UPDATE items SET traction = COALESCE(traction, 0) + ? WHERE url_key = ?",
+                                    (11 - rank, it["url_key"]))
 
         if baseline:
             meta_set(self.db, f"baseline:{name}", iso(found_at))
