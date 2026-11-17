@@ -191,6 +191,15 @@ GitHub Secrets and are NOT in the code).
   - Changed sources.yaml or config.yaml? Upload the new file to the repository (or ask
     Claude Code to push it). The next run uses it.
   - Run a check now: Actions > Lobby News Radar > Run workflow.
+  - THE TIMER: GitHub's own 5-minute timer didn't start for this repository, so the checks
+    are started by cron-job.org (free account, job "Lobby News Radar - GitHub check every
+    5 min") at :01, :06, :11 ... every hour. It uses a GitHub key ("Lobby radar timer",
+    github.com > Settings > Developer settings > Personal access tokens > Fine-grained) that
+    can only start this workflow.
+      * To pause the cloud: turn the job off on cron-job.org (or Disable workflow on GitHub).
+      * When that GitHub key expires, the runs stop: make a new one the same way and ask
+        Claude Code to put it into the cron-job.org job. cron-job.org also emails you if the
+        job keeps failing.
 
 
 10. SCHEDULED INSTAGRAM POSTS (13:00, 16:00, 20:00 New York time)
