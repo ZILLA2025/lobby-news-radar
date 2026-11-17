@@ -8,3 +8,4 @@ pyyaml>=6.0
 anthropic>=2.0
 # For scheduled Instagram posts (README section 10)
 cryptography>=42
+tzdata>=2024.1        # time zones on Windows (posting times in New York time)

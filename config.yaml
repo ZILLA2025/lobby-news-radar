@@ -55,9 +55,14 @@ ai:
 # NOTHING is posted without your Approve. RUMOR items are never offered.
 autopost:
   enabled: false               # set to true once README section 10 is done
-  times_ist: ["06:00", "08:30", "22:30"]
+  # Posting times in the AUDIENCE's time zone (follows US daylight saving by itself).
+  # 13:00 / 16:00 / 20:00 New York = 18:00 / 21:00 / 01:00 London.
+  timezone: "America/New_York"
+  times: ["13:00", "16:00", "20:00"]
   ask_minutes_before: 30       # when the bot asks you to approve
+  owner_sleep_ist: ["00:00", "06:00"]   # no approval requests while you sleep: they come just before
   late_approval_minutes: 90    # approve up to this long after the time = posted right away
   news_tiers: ["OFFICIAL", "REPORTED"]   # news first; if none, the next post from your queue
+  news_max_age_hours: 12       # only news found in the last 12 hours is offered
   github_repo: "ZILLA2025/lobby-news-radar"   # pictures are hosted here so Instagram can fetch them
   instagram_api_version: ""    # leave empty unless told otherwise

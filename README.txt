@@ -193,18 +193,34 @@ GitHub Secrets and are NOT in the code).
   - Run a check now: Actions > Lobby News Radar > Run workflow.
 
 
-10. SCHEDULED INSTAGRAM POSTS (06:00, 08:30, 22:30 India time)
---------------------------------------------------------------
+10. SCHEDULED INSTAGRAM POSTS (13:00, 16:00, 20:00 New York time)
+-------------------------------------------------------------------
+Times are set in New York time because the page is for a US/UK audience:
+  13:00 New York = 18:00 London  (UK evening, US lunch)
+  16:00 New York = 21:00 London  (UK prime time, US after school/work)
+  20:00 New York = 01:00 London  (US prime time)
+They follow US daylight saving by themselves. In India that is 23:30, 02:30, 06:30 in winter
+(22:30, 01:30, 05:30 in summer).
+
 How it works
-  - 30 minutes before each time, the Telegram bot sends you a post: the best OFFICIAL or
-    REPORTED news since the last time or, if there's no news, the next post from YOUR queue.
-  - Tap  ✅ Approve  -> it goes on @thelobby.report at that time.
+  - Before each time the Telegram bot sends you a post: the best OFFICIAL or REPORTED news
+    from the last 12 hours that wasn't offered yet or, if there's none, the next post from
+    YOUR queue.
+  - Normally that's 30 minutes before. But you're never asked between 00:00 and 06:00 India
+    time: posts that go out while you sleep are asked about at 23:45, before bed.
+  - Tap  ✅ Approve  -> it goes on @thelobby.report at that time (even while you sleep).
     Tap  ⏭ Skip     -> the bot shows you the next option.
     No tap          -> nothing is posted. NOTHING is ever posted without your Approve.
   - Approved late (up to 90 minutes after the time)? It's posted right away.
+  - "Nothing to post" message, then news comes in before the time? It's offered then
+    (but never while you sleep).
   - RUMOR items are never offered.
+  - Each message shows both times, e.g. "16:00 New York (02:30 IST)".
   - In the cloud a tap is picked up at the next check, so give it up to ~10 minutes.
     GitHub's timer can also make a post go out a few minutes after the exact time.
+  - Messages that arrive while you sleep (like "Posted") are silent.
+  - Who sees the posts is NOT affected by any of this setup: posts made through Instagram's
+    official API look exactly like posts made in the app.
 
 Your own posts (the queue)
   - Send the bot a photo with the caption written underneath. It replies "Added to your queue".
@@ -215,26 +231,27 @@ Your own posts (the queue)
   - Note: the repository is public, so a queued picture can be seen on GitHub (in the
     "media" branch) until it's posted. Don't queue anything secret.
 
-Setting it up (one time, about 15 minutes)
+Setting it up (one time)
   a) Instagram app > your profile > menu > Settings > "Account type and tools" >
      "Switch to professional account" (Creator or Business, both free). Keep the account public.
-  b) On a computer go to https://developers.facebook.com and log in with Facebook
-     (any Facebook account you control). Accept the developer terms if asked.
-  c) "My Apps" > "Create App". Use case: "Other". App type: "Business".
-     Name: Lobby Radar. Create.
-  d) On the app's page find "Instagram" and click "Set up".
-     Open "API setup with Instagram login".
-  e) Under "Generate access tokens" click "Add account" and log in to @thelobby.report.
-     (If it asks you to accept a tester invite: Instagram app > Settings > Website
-     permissions > Apps and websites > Tester invites > Accept.)
-     Click "Generate token" next to the account, allow it, and copy the long token.
-  f) Paste it into .env:   INSTAGRAM_ACCESS_TOKEN=the token
+  b) On a computer go to https://developers.facebook.com and log in with FACEBOOK
+     (not Instagram). Register as a developer if asked.
+  c) My Apps > Create app. Name: Lobby Radar. Use case: "Manage messaging & content on
+     Instagram". Business portfolio: The Lobby Report.
+  d) Use cases > Customize > Permissions and features: Add  instagram_business_basic  and
+     instagram_business_content_publish.
+  e) App roles > Roles > add  thelobby.report  as an Instagram Tester. Accept the invite at
+     https://www.instagram.com/accounts/manage_access/ (Tester invites tab).
+  f) Use cases > Customize > API setup with Unified login > "2. Generate access tokens" >
+     Add account (log in as @thelobby.report) > Generate token. Copy the token.
+  g) Paste it into .env:   INSTAGRAM_ACCESS_TOKEN=the token
      Then ask Claude Code to "finish the Instagram setup". It tests everything WITHOUT
      posting (python radar.py --ig-check), stores the token in GitHub Secrets and switches
      auto-posting on (config.yaml > autopost > enabled: true).
 
-  The token lasts 60 days and the radar renews it by itself every week. If renewing ever fails
-  you get a Telegram warning: repeat step e) and f).
+  If the token can expire, the radar renews it by itself. If renewing ever fails you get a
+  Telegram warning: repeat step f) and g).
 
-Change the times: config.yaml > autopost > times_ist (India time). Then push it to GitHub.
+Change the times or time zone: config.yaml > autopost > timezone / times / owner_sleep_ist.
+  Then push it to GitHub (or ask Claude Code to).
 Turn it off: config.yaml > autopost > enabled: false.

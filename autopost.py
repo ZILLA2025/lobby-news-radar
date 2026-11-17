@@ -3,8 +3,9 @@
 Uses Instagram's OFFICIAL publishing API (Instagram API with Instagram Login). It never logs in
 to Instagram with a password and never posts anything you didn't approve in Telegram.
 
-How it works (times from config.yaml -> autopost.times_ist):
-  * ask_minutes_before each slot, the bot sends you the best OFFICIAL/REPORTED news found since
+How it works (config.yaml -> autopost.times, in autopost.timezone = the audience's time zone):
+  * ask_minutes_before each slot (or just before owner_sleep_ist if that would be at night in
+    India), the bot sends you the best OFFICIAL/REPORTED news found since
     the previous slot or, if there's no news, the next item from your own queue, with
     ✅ Approve / ⏭ Skip buttons. Skip offers the next option.
   * Approved posts go out at the slot time. Approved after the slot time (up to
@@ -28,6 +29,7 @@ import uuid
 from datetime import datetime, timedelta
 from io import BytesIO
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 from PIL import Image, ImageOps
@@ -82,8 +84,13 @@ class IGError(Exception):
     pass
 
 
-def fmt_slot(key: str) -> str:
-    return key.split(" ")[1]
+def _hhmm(value, where: str) -> str | None:
+    try:
+        hh, mm = (int(x) for x in str(value).split(":"))
+        return f"{hh:02d}:{mm:02d}"
+    except ValueError:
+        log.warning("%s: '%s' is not a time like \"06:00\" - ignored", where, value)
+        return None
 
 
 def _redact(secret: str) -> None:
@@ -98,16 +105,22 @@ class APConfig:
     def __init__(self, s: R.Settings) -> None:
         c = s.cfg.get("autopost") or {}
         self.enabled = bool(c.get("enabled", False))
-        self.times = []
-        for t in c.get("times_ist") or []:
-            try:
-                hh, mm = (int(x) for x in str(t).split(":"))
-                self.times.append(f"{hh:02d}:{mm:02d}")
-            except ValueError:
-                log.warning("autopost.times_ist: '%s' is not a time like \"06:00\" - ignored", t)
-        self.times.sort()
+        # Posting times are in the AUDIENCE's time zone, so they follow its daylight saving.
+        tz_name = str(c.get("timezone") or "Asia/Kolkata")
+        try:
+            self.tz = ZoneInfo(tz_name)
+        except (ZoneInfoNotFoundError, ValueError):
+            log.warning("autopost.timezone '%s' is unknown (e.g. America/New_York) - using India time", tz_name)
+            tz_name, self.tz = "Asia/Kolkata", R.IST
+        self.tz_label = {"Asia/Kolkata": "IST"}.get(tz_name, tz_name.split("/")[-1].replace("_", " "))
+        self.times = sorted({t for t in (_hhmm(x, "autopost.times") for x in c.get("times") or c.get("times_ist") or []) if t})
         self.ask_before = max(5, int(c.get("ask_minutes_before", 30)))
         self.late = max(0, int(c.get("late_approval_minutes", 90)))
+        self.news_max_age = max(1, int(c.get("news_max_age_hours", 12)))
+        sleep = c.get("owner_sleep_ist") or []
+        self.sleep = tuple(_hhmm(x, "autopost.owner_sleep_ist") for x in sleep) if len(sleep) == 2 else None
+        if self.sleep and None in self.sleep:
+            self.sleep = None
         self.tiers = [str(x).upper() for x in (c.get("news_tiers") or ["OFFICIAL", "REPORTED"])]
         self.tiers = [t for t in self.tiers if t != "RUMOR"]  # rumours are never posted
         self.api_version = str(c.get("instagram_api_version") or "").strip()
@@ -373,27 +386,54 @@ class AutoPost:
     def now(self) -> datetime:
         return R.now_utc()
 
+    # Slot keys are "YYYY-MM-DD HH:MM" in the audience time zone (autopost.timezone).
     def slots(self) -> list[tuple[str, datetime]]:
-        """(key, time in UTC) for yesterday, today and tomorrow (India time)."""
-        today = self.now().astimezone(R.IST).date()
-        out = []
-        for d in (-1, 0, 1):
-            day = today + timedelta(days=d)
-            for t in self.cfg.times:
-                hh, mm = (int(x) for x in t.split(":"))
-                dt = datetime(day.year, day.month, day.day, hh, mm, tzinfo=R.IST)
-                out.append((f"{day.isoformat()} {t}", dt.astimezone(R.now_utc().tzinfo)))
-        return sorted(out, key=lambda x: x[1])
+        """(key, time in UTC) for yesterday, today and tomorrow."""
+        today = self.now().astimezone(self.cfg.tz).date()
+        keys = [f"{(today + timedelta(days=d)).isoformat()} {t}" for d in (-1, 0, 1) for t in self.cfg.times]
+        return sorted(((k, self.slot_dt(k)) for k in keys), key=lambda x: x[1])
 
     def slot_dt(self, key: str) -> datetime:
         d, t = key.split(" ")
         y, m, dd = (int(x) for x in d.split("-"))
         hh, mm = (int(x) for x in t.split(":"))
-        return datetime(y, m, dd, hh, mm, tzinfo=R.IST).astimezone(R.now_utc().tzinfo)
+        return datetime(y, m, dd, hh, mm, tzinfo=self.cfg.tz).astimezone(R.now_utc().tzinfo)
+
+    def label(self, key: str) -> str:
+        """'16:00 New York (02:30 IST)' - the posting time, and the same moment in India."""
+        dt = self.slot_dt(key)
+        own = dt.astimezone(self.cfg.tz).strftime("%H:%M")
+        if self.cfg.tz_label == "IST":
+            return f"{own} IST"
+        return f"{own} {self.cfg.tz_label} ({dt.astimezone(R.IST).strftime('%H:%M')} IST)"
+
+    def _sleep_start_before(self, when: datetime) -> datetime | None:
+        """If 'when' is in the owner's sleep hours (India time), the moment that sleep started."""
+        if not self.cfg.sleep:
+            return None
+        (sh, sm), (eh, em) = ((int(x) for x in t.split(":")) for t in self.cfg.sleep)
+        local = when.astimezone(R.IST)
+        for back in (0, 1):
+            day = (local - timedelta(days=back)).date()
+            start = datetime(day.year, day.month, day.day, sh, sm, tzinfo=R.IST)
+            end = datetime(day.year, day.month, day.day, eh, em, tzinfo=R.IST)
+            if end <= start:
+                end += timedelta(days=1)
+            if start <= local < end:
+                return start
+        return None
+
+    def asleep(self) -> bool:
+        return self._sleep_start_before(self.now()) is not None
+
+    def ask_at(self, key: str) -> datetime:
+        """ask_minutes_before the slot - or, if that's while the owner sleeps, 15 min before they go to sleep."""
+        ask = self.slot_dt(key) - timedelta(minutes=self.cfg.ask_before)
+        start = self._sleep_start_before(ask)
+        return start - timedelta(minutes=15) if start else ask
 
     def in_window(self, key: str) -> bool:
-        dt = self.slot_dt(key)
-        return dt - timedelta(minutes=self.cfg.ask_before) <= self.now() <= dt + timedelta(minutes=self.cfg.late)
+        return self.ask_at(key) <= self.now() <= self.slot_dt(key) + timedelta(minutes=self.cfg.late)
 
     def _update_post(self, pid: int, **fields) -> None:
         fields["updated_at"] = R.iso(self.now())
@@ -413,10 +453,8 @@ class AutoPost:
 
     # ---- candidates
     def _news_candidates(self, key: str) -> list:
-        keys = [k for k, _ in self.slots()]
-        idx = keys.index(key) if key in keys else 0
-        prev_dt = self.slots()[idx - 1][1] if idx > 0 else self.slot_dt(key) - timedelta(days=1)
-        since = max(prev_dt - timedelta(minutes=self.cfg.ask_before), self.now() - timedelta(hours=24))
+        """Best news from the last news_max_age_hours that was never offered before."""
+        since = self.now() - timedelta(hours=self.cfg.news_max_age)
         q = ",".join("?" * len(self.cfg.tiers)) or "''"
         rows = self.db.execute(
             f"SELECT * FROM items WHERE tier IN ({q}) AND game IS NOT NULL AND status IN {NEWS_STATUSES}"
@@ -477,10 +515,10 @@ class AutoPost:
         return False
 
     def _send_proposal(self, pid: int, key: str, label: str, caption: str, url: str) -> int | None:
-        t = fmt_slot(key)
+        t = self.label(key)
         late = "" if self.now() < self.slot_dt(key) else " (the time has passed: ✅ posts right away)"
-        head = f"🗓 Post for {t} IST{late}\n{label}\n\n"
-        foot = f"\n\n✅ = post to {self.s.handle} at {t} · ⏭ = show the next option"
+        head = f"🗓 Post for {t}{late}\n{label}\n\n"
+        foot = f"\n\n✅ = post to {self.s.handle} at that time · ⏭ = show the next option"
         room = 1024 - len(head) - len(foot)
         body = caption if len(caption) <= room else caption[: room - 1] + "…"
         buttons = {"inline_keyboard": [[{"text": "✅ Approve", "callback_data": f"ok:{pid}"},
@@ -508,8 +546,8 @@ class AutoPost:
             if row["attempts"] + 1 >= MAX_PUBLISH_ATTEMPTS:
                 self._update_post(pid, status="failed", error=why[:300])
                 self._set_buttons(row["tg_msg"], "❌ Not posted - see message")
-                self.tg.text(f"❌ Couldn't post the {fmt_slot(row['slot'])} post to Instagram:\n{why}\n\n"
-                             "Post it by hand from the picture above if you still want it.")
+                self.tg.text(f"❌ Couldn't post the {self.label(row['slot'])} post to Instagram:\n{why}\n\n"
+                             "Post it by hand from the picture above if you still want it.", silent=self.asleep())
             else:
                 self._update_post(pid, status="approved", error=why[:300])  # retried on the next check
             return
@@ -520,7 +558,8 @@ class AutoPost:
         self._update_post(pid, permalink=link)
         log.info("Posted to Instagram: %s %s", row["slot"], link)
         self._set_buttons(row["tg_msg"], "✅ Posted on Instagram")
-        self.tg.text(f"✅ Posted on Instagram ({fmt_slot(row['slot'])} IST)\n{link}\nReply to comments for the next 30 minutes 💬")
+        self.tg.text(f"✅ Posted on Instagram · {self.label(row['slot'])}\n{link}\n"
+                     "Reply to comments in the first 30 minutes if you can 💬", silent=self.asleep())
         self.host.delete(row["image_name"], row["image_sha"])
 
     def _drop_news_picture(self, row) -> None:
@@ -531,7 +570,7 @@ class AutoPost:
     def run_slots(self) -> None:
         now = self.now()
         for key, dt in self.slots():
-            ask_at, end = dt - timedelta(minutes=self.cfg.ask_before), dt + timedelta(minutes=self.cfg.late)
+            ask_at, end = self.ask_at(key), dt + timedelta(minutes=self.cfg.late)
             rows = self.db.execute("SELECT * FROM posts WHERE slot=?", (key,)).fetchall()
             for r in rows:
                 if r["status"] == "approved" and now >= dt and r["attempts"] < MAX_PUBLISH_ATTEMPTS:
@@ -542,14 +581,19 @@ class AutoPost:
                     self._drop_news_picture(r)
                 elif r["status"] == "publishing" and now > end + timedelta(minutes=30):
                     self._update_post(r["id"], status="failed", error="stopped while posting")
-                    self.tg.text(f"⚠️ The {fmt_slot(key)} post was interrupted while posting. "
+                    self.tg.text(f"⚠️ The {self.label(key)} post was interrupted while posting. "
                                  "Check Instagram: if it's not there, post it by hand.")
-            if not rows and ask_at <= now <= end:
+            if not (ask_at <= now <= end):
+                continue
+            if not rows:
                 if not self.propose(key):
                     self.db.execute("INSERT INTO posts(slot, kind, status, created_at) VALUES(?,?,?,?)",
                                     (key, "none", "empty", R.iso(now)))
-                    self.tg.text(f"🗓 {fmt_slot(key)} IST post: no new news and your queue is empty, so nothing "
-                                 "will be posted.\nSend me a photo with a caption and I'll offer it.", silent=True)
+                    self.tg.text(f"🗓 {self.label(key)} post: no new news and your queue is empty, so nothing "
+                                 "will be posted for now. If news comes in before then, I'll offer it.\n"
+                                 "Or send me a photo with a caption.", silent=True)
+            elif rows[-1]["status"] == "empty" and now < dt and not self.asleep():
+                self.propose(key)  # fresh news since the "nothing to post" message: offer it
 
     def reopen_open_slots(self) -> None:
         """After something is added to the queue: offer it for a slot that currently has nothing planned."""
@@ -588,7 +632,7 @@ class AutoPost:
         if not row or row["status"] != "proposed":
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Already handled"}, quiet=True)
             return
-        key, t = row["slot"], fmt_slot(row["slot"])
+        key, t = row["slot"], self.label(row["slot"])
         if self.now() > self.slot_dt(key) + timedelta(minutes=self.cfg.late):
             self._update_post(row["id"], status="expired")
             self._set_buttons(row["tg_msg"], "⌛ Too late - not posted")
@@ -596,7 +640,7 @@ class AutoPost:
             return
         if action == "ok":
             self._update_post(row["id"], status="approved")
-            when = "posting now" if self.now() >= self.slot_dt(key) else f"posts at {t} IST"
+            when = "posting now" if self.now() >= self.slot_dt(key) else f"posts at {t}"
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": f"Approved - {when}"}, quiet=True)
             self._set_buttons(row["tg_msg"], f"✅ Approved · {when}")
             log.info("Approved: %s post (%s #%s)", key, row["kind"], row["ref"])
@@ -606,7 +650,7 @@ class AutoPost:
             self._set_buttons(row["tg_msg"], "⏭ Skipped")
             self._drop_news_picture(row)
             if not self.propose(key):
-                self.tg.text(f"No more options for {t} IST, so nothing will be posted then.\n"
+                self.tg.text(f"No more options for {t}, so nothing will be posted then.\n"
                              "Send me a photo with a caption and I'll offer it.", silent=True)
 
     def _on_message(self, msg: dict) -> None:
@@ -697,10 +741,11 @@ class AutoPost:
         self.tg.text(f"✏️ Caption of #{row['id']} changed." + (" (Also for the post waiting for approval.)" if changed else ""))
 
     def _status(self) -> None:
-        today = self.now().astimezone(R.IST).date().isoformat()
-        lines = [f"🗓 Posting times today (IST) for {self.s.handle}:"]
+        today = self.now().astimezone(self.cfg.tz).date().isoformat()
+        lines = [f"🗓 Today's posting times for {self.s.handle}:"]
         for t in self.cfg.times:
             key = f"{today} {t}"
+            t = self.label(key)
             rows = self.db.execute("SELECT status FROM posts WHERE slot=? ORDER BY id", (key,)).fetchall()
             st = rows[-1]["status"] if rows else "not asked yet"
             lines.append(f"  {t} - {st}")
@@ -750,7 +795,8 @@ def check_setup(radar: R.Radar) -> int:
 
     print("\nAuto-posting check (nothing will be posted):")
     line("config.yaml autopost", bool(ap.cfg.times),
-         f"enabled={ap.cfg.enabled}, times IST {', '.join(ap.cfg.times) or 'none'}, ask {ap.cfg.ask_before} min before")
+         f"enabled={ap.cfg.enabled}, times {', '.join(ap.cfg.times) or 'none'} {ap.cfg.tz_label}, "
+         f"ask {ap.cfg.ask_before} min before, not between {'-'.join(ap.cfg.sleep or ()) or '(any time)'} IST")
     line("Telegram", ap.s.telegram_ready)
     token = ap.tokens.get()
     if not token:
