@@ -665,9 +665,9 @@ class Fonts:
         custom = sorted(p for p in FONTS_DIR.glob("*") if p.suffix.lower() in (".ttf", ".otf")) if FONTS_DIR.exists() else []
         self.paths: dict[str, tuple[str | None, bool]] = {}
         for kind in ("headline", "bold", "regular"):
-            if custom:
+            if custom and kind == "headline":  # brand font (Inter Black Italic) for headlines only
                 italic = any(w in custom[0].name.lower() for w in ("italic", "oblique"))
-                self.paths[kind] = (str(custom[0]), kind == "headline" and not italic)
+                self.paths[kind] = (str(custom[0]), not italic)
                 continue
             self.paths[kind] = (None, kind == "headline")
             for path, fake in _font_candidates(kind):
@@ -680,7 +680,13 @@ class Fonts:
         key = (kind, size)
         if key not in self._cache:
             path = self.paths[kind][0]
-            self._cache[key] = ImageFont.truetype(path, size) if path else ImageFont.load_default(size)
+            font = ImageFont.truetype(path, size) if path else ImageFont.load_default(size)
+            try:  # variable font (Inter): heaviest weight, display optical size
+                axes = font.get_variation_axes()
+                font.set_variation_by_axes([a["maximum"] for a in axes])
+            except Exception:
+                pass
+            self._cache[key] = font
         return self._cache[key]
 
     def fake_italic(self) -> bool:
@@ -789,8 +795,95 @@ def time_label(published: datetime | None, found: datetime) -> str:
     return ref.astimezone(timezone.utc).strftime("%d %b %Y").upper().lstrip("0")
 
 
+STRONG_SPLIT = {"to", "as", "after", "because", "while", "but", "and", "so", "ahead", "amid", "despite", "before"}
+SOFT_SPLIT = {"for", "with", "in", "on", "at", "by", "from", "into", "over"}
+
+
+def split_headline(title: str) -> tuple[str, str]:
+    """Two-tone headline: (the fact, the hook). 'KFC is hosting a fake funeral for Ann Alibi' |
+    'to help fans take time off for GTA VI'. Split at ':' / ' - ', else at the connector nearest 55%."""
+    t = " ".join(title.split())
+    for sep in (": ", " — ", " – ", " - "):
+        if sep in t:
+            a, b = t.split(sep, 1)
+            if len(a.split()) >= 2 and len(b.split()) >= 2:
+                return a.strip(), b.strip()
+    words = t.split()
+    n = len(words)
+    if n < 6:
+        return t, ""
+    best, best_cost = None, 1e9
+    for i in range(2, n - 1):
+        w = re.sub(r"[^a-z]", "", words[i].lower())
+        if w in STRONG_SPLIT or w in SOFT_SPLIT:
+            cost = abs(i - n * 0.55) + (0 if w in STRONG_SPLIT else 2)
+            if cost < best_cost:
+                best, best_cost = i, cost
+    if best is None:
+        best = round(n * 0.55)
+    return " ".join(words[:best]), " ".join(words[best:])
+
+
+def render_fullbleed(kind: str, out_path: Path, d: dict, s: Settings, fonts: Fonts, photo: Image.Image) -> None:
+    """News card in the big-page style: the picture fills the frame, the full headline sits over a dark fade
+    at the bottom in two colours (fact in white, hook in the accent colour), handle above, source below."""
+    W, H = (1080, 1350) if kind == "card" else (1080, 1920)
+    bg, accent = hex_rgb(s.bg), hex_rgb(RUMOR_COLOR if d["tier"] == "RUMOR" else s.accent)
+    white, grey = (255, 255, 255), (190, 196, 204)
+    top = 0 if kind == "card" else 250
+    bottom = H if kind == "card" else H - 300
+    img = ImageOps.fit(photo.convert("RGB"), (W, H), method=Image.Resampling.LANCZOS, centering=(0.5, 0.32))
+
+    # Dark fades: a strong one at the bottom for the headline, a light one at the top for the labels.
+    def fade(y0: int, y1: int, max_alpha: int, upward: bool = False) -> None:
+        h = max(1, y1 - y0)
+        mask = Image.linear_gradient("L").resize((W, h))
+        if upward:
+            mask = mask.transpose(Image.Transpose.FLIP_TOP_BOTTOM)
+        mask = mask.point(lambda v: int(v * max_alpha / 255))
+        img.paste(Image.new("RGB", (W, h), bg), (0, y0), mask)
+    fade(int(H * 0.36), H, 250)
+    fade(0, top + 190, 170, upward=True)
+    draw = ImageDraw.Draw(img)
+    M = 60
+
+    draw.text((M, top + 62), d["game_label"], font=fonts.get("headline", 44), fill=accent, anchor="lm")
+    pfont = fonts.get("bold", 26)
+    label = RUMOR_LABEL if d["tier"] == "RUMOR" else d["tier"]
+    pw = text_w(draw, label, pfont) + 44
+    draw_pill(draw, W - M - pw, top + 37, d["tier"], pfont, accent, bg)
+
+    # Headline: as big as fits in at most 5 lines (6 on stories), fact then hook, centred.
+    fact, hook = split_headline(d.get("full_headline") or d["headline"])
+    fact, hook = fact.upper(), hook.upper()
+    max_w = W - 2 * M
+    src = f"Reported by {d['source']}" if d["tier"] == "REPORTED" else f"Source: {d['source']}"
+    sfont = fonts.get("bold", 26)
+    bottom_pad = 64
+    for size in range(104, 50, -4):
+        hfont = fonts.get("headline", size)
+        a_lines = wrap(draw, fact, hfont, max_w)
+        b_lines = wrap(draw, hook, hfont, max_w) if hook else []
+        if len(a_lines) + len(b_lines) <= (5 if kind == "card" else 6):
+            break
+    line_h = int(hfont.size * 1.04)
+    block_h = (len(a_lines) + len(b_lines)) * line_h
+    y = bottom - bottom_pad - 44 - block_h
+    draw.text((W // 2, y - 46), s.handle, font=fonts.get("bold", 28), fill=accent, anchor="mm")
+    for lines, color in ((a_lines, white), (b_lines, accent)):
+        for line in lines:
+            draw.text((W // 2, y), line, font=hfont, fill=color, anchor="ma")
+            y += line_h
+    if text_w(draw, src, sfont) > max_w:
+        src = ellipsize(draw, src, sfont, max_w)
+    draw.text((W // 2, bottom - bottom_pad), src, font=sfont, fill=grey, anchor="mm")
+    img.save(out_path, "PNG", optimize=True)
+
+
 def render(kind: str, out_path: Path, d: dict, s: Settings, fonts: Fonts, photo: Image.Image | None) -> None:
     """kind = 'card' (1080x1350 post) or 'story' (1080x1920, top 250 / bottom 300 left free)."""
+    if photo is not None:
+        return render_fullbleed(kind, out_path, d, s, fonts, photo)
     W, H = (1080, 1350) if kind == "card" else (1080, 1920)
     bg, accent = hex_rgb(s.bg), hex_rgb(RUMOR_COLOR if d["tier"] == "RUMOR" else s.accent)
     white, grey, dim = (255, 255, 255), (163, 169, 178), (120, 126, 135)
@@ -1018,6 +1111,8 @@ def make_draft(item: dict, s: Settings, fonts: Fonts, meta: dict | None = None,
     d = {
         "folder": folder, "tier": item["tier"], "game": item["game"], "source": item["source"],
         "game_label": GAME_LABEL[item["game"]], "headline": make_headline(title),
+        # the source's full title (no "..." cut) for the full-picture card; very long titles fall back to headline
+        "full_headline": strip_unrenderable(clean_title(title)) if len(clean_title(title)) <= 110 else make_headline(title),
         "caption_headline": sentence_case(shorten_title(title)),
         "summary": summary, "time_label": time_label(item.get("published"), found),
     }
