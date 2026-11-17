@@ -5,3 +5,9 @@ radar.log*
 drafts/
 __pycache__/
 account_snapshot.json
+
+# Strategy and stats stay on this PC (the repo is public)
+CLAUDE.md
+results.csv
+weekly_review.md
+content_calendar.csv
