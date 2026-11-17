@@ -15,6 +15,7 @@ Run modes:
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import logging
 import logging.handlers
@@ -42,6 +43,7 @@ DB_PATH = BASE_DIR / "radar.db"
 LOG_PATH = BASE_DIR / "radar.log"
 DRAFTS_DIR = BASE_DIR / "drafts"
 FONTS_DIR = BASE_DIR / "assets" / "fonts"
+ASSETS_DIR = BASE_DIR / "assets" / "Official"   # the owner's official art (local; in the cloud: private repo)
 
 IST = timezone(timedelta(hours=5, minutes=30), "IST")
 BROWSER_UA = (
@@ -872,6 +874,76 @@ def render(kind: str, out_path: Path, d: dict, s: Settings, fonts: Fonts, photo:
 
 # --------------------------------------------------------------------------- drafts
 
+# --------------------------------------------------------------------------- official assets (the owner's folder)
+# Story keyword -> words that appear in the asset file/folder names under assets/Official.
+ASSET_KEYWORDS = {
+    "lucia": ["lucia"], "jason": ["jason"], "boobie": ["boobie"], "brian heder": ["brian heder"],
+    "cal hampton": ["cal hampton"], "drequan": ["drequan"], "raul": ["raul"], "dimez": ["dimez"],
+    "vice city": ["vice city"], "leonida keys": ["leonida keys"], "keys": ["leonida keys"],
+    "gellhorn": ["gellhorn"], "ambrosia": ["ambrosia"], "grassrivers": ["grassrivers"], "kalaga": ["kalaga"],
+    "ultimate edition": ["ultimate"], "vintage": ["vintage"], "stanier": ["stanier"],
+    "dmz": ["dmz"], "x01": ["xo1", "x01"], "xo1": ["xo1"], "shipment": ["shipment"],
+    "shoot house": ["shoot house", "shoothouse"], "canyon": ["canyon"], "backstab": ["backstab"],
+    "ministry": ["ministry"], "drop zone": ["dropzone"], "killblock": ["killblock"], "blackcell": ["blackcell"],
+    "valen": ["valen"], "gunfight": ["gunfight"],
+}
+GAME_FALLBACK = {"gta6": ["gta6 pics places", "jason and lucia 01 landscape", "jason and lucia 02 landscape"],
+                 "mw4": ["cod photos mw4 s1 gen", "announcement tout", "cod photos"]}
+_ASSET_INDEX: list[tuple[Path, str]] | None = None
+
+
+def _asset_index() -> list[tuple[Path, str]]:
+    """Official stills only: no videos, no logos, and only the landscape copy of each wallpaper."""
+    global _ASSET_INDEX
+    if _ASSET_INDEX is None:
+        _ASSET_INDEX = []
+        if ASSETS_DIR.exists():
+            for p in ASSETS_DIR.rglob("*"):
+                if p.suffix.lower() not in (".jpg", ".jpeg", ".png", ".webp") or "logo" in p.as_posix().lower():
+                    continue
+                name = re.sub(r"[_\-/\\.]+", " ", p.relative_to(ASSETS_DIR).as_posix().lower())
+                if "wallpaper" in name and "landscape" not in name:
+                    continue
+                _ASSET_INDEX.append((p, " ".join(name.split())))
+    return _ASSET_INDEX
+
+
+def pick_official_asset(item: dict, text: str) -> tuple[Image.Image, Path] | None:
+    """The owner's official art that matches the story (Lucia story -> Lucia art), else the game's key art.
+    The same story always gets the same picture; different stories get different ones."""
+    index = _asset_index()
+    if not index:
+        return None
+    t = " " + re.sub(r"[^a-z0-9 ]+", " ", text.lower()) + " "
+    scores: dict[Path, int] = {}
+    for key, targets in ASSET_KEYWORDS.items():
+        if f" {key} " in t:
+            for p, name in index:
+                if any(x in name for x in targets):
+                    # the Places/People photos beat packs and bonus items that only mention the name
+                    bonus = 0.5 if (" places " in f" {name} " or " people " in f" {name} ") else 0
+                    scores[p] = scores.get(p, 0) + 1 + bonus
+    if not scores:
+        for i, pat in enumerate(GAME_FALLBACK.get(item.get("game"), [])):
+            for p, name in index:
+                if pat in name:
+                    scores.setdefault(p, 1)
+            if scores:
+                break
+    if not scores:
+        return None
+    best = max(scores.values())
+    choices = sorted(p for p, s in scores.items() if s == best)
+    pick = choices[int.from_bytes(hashlib.sha1(item.get("url", text).encode()).digest()[:4], "big") % len(choices)]
+    try:
+        img = Image.open(pick)
+        img.load()
+        return img.convert("RGB"), pick
+    except Exception as e:
+        log.warning("Could not open asset %s: %s", pick, e)
+        return None
+
+
 def download_image(url: str, dest: Path) -> Image.Image | None:
     if not url:
         return None
@@ -935,6 +1007,13 @@ def make_draft(item: dict, s: Settings, fonts: Fonts, meta: dict | None = None,
         # their own design, so REPORTED (and RUMOR) cards are text-only in our own style.
         if item["tier"] == "OFFICIAL":
             photo = download_image(meta.get("image") or item.get("image") or "", folder / "source_image.jpg")
+        if photo is None and item["tier"] != "RUMOR":
+            # No official article image: use the owner's official art that fits the story.
+            picked = pick_official_asset(item, f"{title} {description}")
+            if picked:
+                photo, asset_path = picked
+                photo.save(folder / "source_image.jpg", "JPEG", quality=92)
+                (folder / "asset.txt").write_text(f"Official asset: {asset_path.relative_to(ASSETS_DIR)}\n", encoding="utf-8")
 
     d = {
         "folder": folder, "tier": item["tier"], "game": item["game"], "source": item["source"],

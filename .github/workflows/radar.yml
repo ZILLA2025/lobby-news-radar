@@ -33,6 +33,16 @@ jobs:
 
       - run: pip install -r requirements.txt
 
+      # The owner's official stills (private repo, read-only deploy key). If the key isn't set up,
+      # cards simply fall back to text-only and the radar keeps running.
+      - name: Official assets (private)
+        continue-on-error: true
+        uses: actions/checkout@v5
+        with:
+          repository: ZILLA2025/lobby-assets
+          ssh-key: ${{ secrets.ASSETS_DEPLOY_KEY }}
+          path: assets/Official
+
       - name: Bold font for the cards
         run: |
           test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf || \
@@ -67,7 +77,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: drafts-${{ github.run_id }}
-          path: drafts/
+          # our cards only - not the copies of official stills (this repo and its artifacts are public)
+          path: |
+            drafts/
+            !drafts/**/source_image.jpg
           retention-days: 3
 
   # GitHub pauses scheduled workflows in public repos after 60 days without a commit.
