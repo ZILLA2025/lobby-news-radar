@@ -6,3 +6,5 @@ python-dotenv>=1.0
 pyyaml>=6.0
 # Optional: only used for AI caption options when ANTHROPIC_API_KEY is set in .env
 anthropic>=2.0
+# For scheduled Instagram posts (README section 10)
+cryptography>=42

@@ -19,7 +19,9 @@ Every alert is labelled:
   REPORTED  = from a news site. Post it, but keep the "Reported by ..." line.
   RUMOR     = Reddit. NEVER post as fact. No draft is made.
 
-It never posts to Instagram for you (that's against Instagram's rules and risky for the page).
+It never logs in to Instagram with your password (that's against Instagram's rules and risky
+for the page). Optional: scheduled posts at fixed times through Instagram's OFFICIAL API, only
+after you tap Approve in Telegram - see section 10.
 
 
 1. INSTALL (one time)
@@ -189,3 +191,50 @@ GitHub Secrets and are NOT in the code).
   - Changed sources.yaml or config.yaml? Upload the new file to the repository (or ask
     Claude Code to push it). The next run uses it.
   - Run a check now: Actions > Lobby News Radar > Run workflow.
+
+
+10. SCHEDULED INSTAGRAM POSTS (06:00, 08:30, 22:30 India time)
+--------------------------------------------------------------
+How it works
+  - 30 minutes before each time, the Telegram bot sends you a post: the best OFFICIAL or
+    REPORTED news since the last time or, if there's no news, the next post from YOUR queue.
+  - Tap  ✅ Approve  -> it goes on @thelobby.report at that time.
+    Tap  ⏭ Skip     -> the bot shows you the next option.
+    No tap          -> nothing is posted. NOTHING is ever posted without your Approve.
+  - Approved late (up to 90 minutes after the time)? It's posted right away.
+  - RUMOR items are never offered.
+  - In the cloud a tap is picked up at the next check, so give it up to ~10 minutes.
+    GitHub's timer can also make a post go out a few minutes after the exact time.
+
+Your own posts (the queue)
+  - Send the bot a photo with the caption written underneath. It replies "Added to your queue".
+    Send it as a File (paperclip > File) to keep full quality.
+  - Pictures that are too tall/wide for Instagram get dark bars added, never cropped.
+  - /queue  list   ·  /remove 3  delete #3  ·  /caption 3 new text  change a caption
+    /status  today's times  ·  /help
+  - Note: the repository is public, so a queued picture can be seen on GitHub (in the
+    "media" branch) until it's posted. Don't queue anything secret.
+
+Setting it up (one time, about 15 minutes)
+  a) Instagram app > your profile > menu > Settings > "Account type and tools" >
+     "Switch to professional account" (Creator or Business, both free). Keep the account public.
+  b) On a computer go to https://developers.facebook.com and log in with Facebook
+     (any Facebook account you control). Accept the developer terms if asked.
+  c) "My Apps" > "Create App". Use case: "Other". App type: "Business".
+     Name: Lobby Radar. Create.
+  d) On the app's page find "Instagram" and click "Set up".
+     Open "API setup with Instagram login".
+  e) Under "Generate access tokens" click "Add account" and log in to @thelobby.report.
+     (If it asks you to accept a tester invite: Instagram app > Settings > Website
+     permissions > Apps and websites > Tester invites > Accept.)
+     Click "Generate token" next to the account, allow it, and copy the long token.
+  f) Paste it into .env:   INSTAGRAM_ACCESS_TOKEN=the token
+     Then ask Claude Code to "finish the Instagram setup". It tests everything WITHOUT
+     posting (python radar.py --ig-check), stores the token in GitHub Secrets and switches
+     auto-posting on (config.yaml > autopost > enabled: true).
+
+  The token lasts 60 days and the radar renews it by itself every week. If renewing ever fails
+  you get a Telegram warning: repeat step e) and f).
+
+Change the times: config.yaml > autopost > times_ist (India time). Then push it to GitHub.
+Turn it off: config.yaml > autopost > enabled: false.

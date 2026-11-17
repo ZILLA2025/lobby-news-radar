@@ -163,6 +163,8 @@ CREATE INDEX IF NOT EXISTS idx_title ON items(title_key);
 CREATE INDEX IF NOT EXISTS idx_found ON items(found_at);
 CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT);
 """
+# Columns added after the first release (older radar.db files get them on start).
+MIGRATIONS = ["ALTER TABLE items ADD COLUMN summary TEXT"]
 # status: seen (first-run baseline) | filtered (no keyword match) | duplicate (same title as
 # an earlier item) | pending (new, alert not delivered yet) | alerted | digest (LOW, waits for
 # the daily digest) | rumor_alerted
@@ -172,6 +174,11 @@ def open_db() -> sqlite3.Connection:
     db = sqlite3.connect(DB_PATH, timeout=30, isolation_level=None)
     db.row_factory = sqlite3.Row
     db.executescript(SCHEMA)
+    for sql in MIGRATIONS:
+        try:
+            db.execute(sql)
+        except sqlite3.OperationalError:
+            pass  # already there
     return db
 
 
@@ -205,11 +212,13 @@ def save_item(db, item: dict, status: str) -> int | None:
             return None
         cur = db.execute(
             "INSERT INTO items(source, tier, game, priority, title, url, published, found_at, status,"
-            " url_key, title_key) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            " url_key, title_key, summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 item["source"], item["tier"], item.get("game"), item.get("priority"), item["title"],
                 item["url"], iso(item.get("published")), iso(item["found_at"]), status,
                 item["url_key"], item["title_key"],
+                # kept for new items only, so a scheduled post can rebuild the card later
+                (item.get("summary") or "")[:3000] if status == "pending" else None,
             ),
         )
         db.execute("COMMIT")
@@ -994,17 +1003,22 @@ class Telegram:
         self.s = s
 
     def _call(self, method: str, data: dict, files: dict | None = None) -> bool:
+        return self.api(method, data, files) is not None
+
+    def api(self, method: str, data: dict, files: dict | None = None, quiet: bool = False):
+        """Call the Bot API. Returns the 'result' (True, a dict or a list), or None on failure."""
         if not self.s.telegram_ready:
             log.error("Telegram is not set up: put TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in .env")
-            return False
+            return None
         url = f"https://api.telegram.org/bot{self.s.token}/{method}"
-        data = {"chat_id": self.s.chat_id, **data}
+        if method not in ("getUpdates", "getFile", "answerCallbackQuery"):
+            data = {"chat_id": self.s.chat_id, **data}
         for attempt in range(3):
             try:
                 resp = requests.post(url, data=data, files=files, timeout=30)
                 body = resp.json() if resp.headers.get("content-type", "").startswith("application/json") else {}
                 if resp.ok and body.get("ok"):
-                    return True
+                    return body.get("result", True)
                 if resp.status_code == 429:
                     time.sleep(int((body.get("parameters") or {}).get("retry_after", 5)) + 1)
                     continue
@@ -1013,12 +1027,12 @@ class Telegram:
                     desc += " (the bot token in .env is wrong)"
                 elif "chat not found" in desc.lower():
                     desc += " (the chat ID in .env is wrong, or you haven't sent the bot a message yet)"
-                log.error("Telegram %s failed: %s", method, desc)
-                return False
+                (log.info if quiet else log.error)("Telegram %s failed: %s", method, desc)
+                return None
             except requests.RequestException as e:
                 log.warning("Telegram %s: network problem (%s), retrying", method, type(e).__name__)
                 time.sleep(3 * (attempt + 1))
-        return False
+        return None
 
     def text(self, text: str, silent: bool = False) -> bool:
         return self._call("sendMessage", {
@@ -1326,6 +1340,7 @@ def run_loop(radar: Radar) -> int:
                 last_retry = time.time()
                 safe_retry(radar)
             maybe_digest(radar)
+            autopost.tick(radar)
         except Exception:
             log.exception("Error during the check loop (continuing)")
         time.sleep(20)
@@ -1423,11 +1438,14 @@ def main() -> int:
     mode.add_argument("--loop", action="store_true", help="check forever")
     mode.add_argument("--test", action="store_true", help="send a test Telegram message + sample draft")
     mode.add_argument("--digest", action="store_true", help="send today's LOW items summary")
+    mode.add_argument("--ig-check", action="store_true", help="test auto-posting setup (posts nothing)")
     args = parser.parse_args()
 
     setup_logging()
     s = Settings()
     radar = Radar(s)
+    if args.ig_check:
+        return autopost.check_setup(radar)
     if args.test:
         return run_test(radar)
     if args.digest:
@@ -1439,16 +1457,22 @@ def main() -> int:
         sources = s.sources
         if s.cloud:
             sources = cloud_due_sources(radar)
+            autopost.tick(radar)  # approvals and due posts first, before the slower source checks
         results = radar.check_all(sources, wait_ok=True)
         safe_retry(radar)
         if s.cloud:
             maybe_digest(radar)  # no --loop in the cloud, so the daily digest is sent from here
+            autopost.tick(radar)  # again, so news found in this run can be offered
         print_table(results)
         return 0
     return run_loop(radar)
 
 
 if __name__ == "__main__":
+    # autopost.py does "import radar": make that this same module, not a second copy of it.
+    sys.modules.setdefault("radar", sys.modules["__main__"])
+    import autopost
+
     try:
         sys.exit(main())
     except KeyboardInterrupt:
