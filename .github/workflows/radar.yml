@@ -1,0 +1,79 @@
+# Lobby News Radar in the cloud: one check every ~5 minutes on GitHub's computers.
+# Secrets (Settings > Secrets and variables > Actions): TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
+# and optionally ANTHROPIC_API_KEY. Never put them in this file.
+name: Lobby News Radar
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"   # every 5 min (GitHub often runs it a few minutes late)
+    - cron: "17 3 * * 1"    # weekly keep-alive (Monday 08:47 IST), see the keepalive job
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Only one check at a time, so radar.db (the list of seen items) is never overwritten by an older copy.
+concurrency:
+  group: radar
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - run: pip install -r requirements.txt
+
+      - name: Bold font for the cards
+        run: |
+          test -f /usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf || \
+            (sudo apt-get update -qq && sudo apt-get install -y -qq fonts-dejavu-core)
+
+      - name: Restore seen items
+        uses: actions/cache/restore@v4
+        with:
+          path: radar.db
+          key: radar-db-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: radar-db-
+
+      - name: Check sources
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+        run: python radar.py --once
+
+      - name: Save seen items
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: radar.db
+          key: radar-db-${{ github.run_id }}-${{ github.run_attempt }}
+
+      # Full-quality card.png / story.png / caption.txt, downloadable from the run page for 3 days.
+      - name: Keep drafts
+        if: always() && hashFiles('drafts/**') != ''
+        uses: actions/upload-artifact@v4
+        with:
+          name: drafts-${{ github.run_id }}
+          path: drafts/
+          retention-days: 3
+
+  # GitHub pauses scheduled workflows in public repos after 60 days without a commit.
+  # Re-enabling the workflow once a week resets that timer.
+  keepalive:
+    if: github.event.schedule == '17 3 * * 1'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - run: gh api -X PUT "repos/${{ github.repository }}/actions/workflows/radar.yml/enable"
+        env:
+          GH_TOKEN: ${{ github.token }}

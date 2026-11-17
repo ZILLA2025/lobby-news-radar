@@ -1,0 +1,6 @@
+.env
+radar.db
+radar.db-journal
+radar.log*
+drafts/
+__pycache__/

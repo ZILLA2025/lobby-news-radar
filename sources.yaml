@@ -1,0 +1,168 @@
+# Lobby News Radar - sources and keywords
+# Edit with Notepad. To turn a source off, change  enabled: true  to  enabled: false
+# All URLs below were checked on 2026-11-02.
+#
+# Each source:
+#   name      shown in alerts, on the card and in the caption
+#   url       the feed or page to watch
+#   type      rss | page | youtube | reddit
+#   game      gta6 | mw4 | both
+#   tier      OFFICIAL (publish-ready) | REPORTED (post with "Reported by ...") | RUMOR (alert only, never drafted)
+#   keywords  gta6 | mw4 | both  -> only keep items that match that keyword list (leave out = keep everything)
+#   allow_topics  true -> the "topics" words below also count (only for sources that cover ONE game series)
+#   enabled   true | false
+
+keywords:
+  gta6:
+    # Any of these in the title/summary = GTA VI news
+    names: ["GTA 6", "GTA VI", "GTA6", "GTAVI", "Grand Theft Auto VI", "Grand Theft Auto 6", "Leonida", "Vice City"]
+    # These words are too common on their own ("trailer" is on every game), so they only
+    # count on sources with allow_topics: true. Priority (HIGH/MEDIUM) is set in config.yaml.
+    topics: ["Lucia", "Jason", "trailer", "pre-order", "release date"]
+    exclude: []
+  mw4:
+    names: ["Modern Warfare 4", "MW4", "Warzone", "DMZ"]
+    topics: ["Season 1", "Season 2", "Reloaded", "patch notes", "Double XP", "playlist", "Battle Pass"]
+    # A "topics"-only match is dropped if it's about another CoD game:
+    exclude: ["Black Ops", "BO7", "BO6", "Call of Duty: Mobile", "COD Mobile", "Modern Warfare III", "MW3"]
+
+sources:
+
+  # ---------------- OFFICIAL ----------------
+
+  - name: Rockstar Newswire
+    url: https://www.rockstargames.com/newswire
+    type: page
+    game: gta6
+    tier: OFFICIAL
+    keywords: gta6
+    # DISABLED: the page is built entirely by JavaScript - the HTML has no articles, there is
+    # no RSS feed (/newswire/rss is 404) and no sitemap. It can't be read reliably without a
+    # browser. Rockstar trailers still arrive via the Rockstar YouTube feed below, and big news
+    # is also covered by Take-Two, PlayStation Blog and Xbox Wire. Keep Instagram notifications
+    # on for @rockstargames.
+    enabled: false
+
+  - name: Rockstar Games YouTube
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UC6VcWc1rAoWdBCM0JxrRQ3A
+    type: youtube
+    game: gta6
+    tier: OFFICIAL
+    keywords: gta6         # the channel also posts GTA Online / Red Dead videos
+    enabled: true
+
+  - name: Take-Two Investor News
+    url: https://ir.take2games.com/rss/news-releases.xml
+    type: rss
+    game: gta6
+    tier: OFFICIAL
+    keywords: gta6         # also covers NBA 2K, Borderlands, etc.
+    enabled: true
+
+  - name: Call of Duty Blog
+    url: https://www.callofduty.com/blog
+    type: page
+    game: mw4
+    tier: OFFICIAL
+    keywords: mw4
+    allow_topics: true
+    link_pattern: '/blog/\d{4}/\d{2}/[A-Za-z0-9-]+'
+    enabled: true
+
+  - name: Call of Duty YouTube
+    url: https://www.youtube.com/feeds/videos.xml?channel_id=UC9YydG57epLqxA9cTzZXSeQ
+    type: youtube
+    game: mw4
+    tier: OFFICIAL
+    keywords: mw4
+    allow_topics: true
+    enabled: true
+
+  - name: PlayStation Blog
+    url: https://blog.playstation.com/feed/
+    type: rss
+    game: both
+    tier: OFFICIAL
+    keywords: both
+    enabled: true
+
+  - name: Xbox Wire
+    url: https://news.xbox.com/en-us/feed/
+    type: rss
+    game: both
+    tier: OFFICIAL
+    keywords: both
+    enabled: true
+
+  # ---------------- REPORTED ----------------
+
+  - name: Charlie Intel
+    url: https://www.charlieintel.com/feed/
+    type: rss
+    game: mw4
+    tier: REPORTED
+    keywords: mw4
+    allow_topics: true
+    # DISABLED: the feed (and the whole website) has not shown a new article since
+    # 31 Jan 2025 - it would never alert. Keep Instagram notifications on for @charlieintel.
+    enabled: false
+
+  - name: IGN
+    url: https://www.ign.com/rss/articles/feed?tags=games
+    type: rss
+    game: both
+    tier: REPORTED
+    keywords: both
+    enabled: true
+
+  - name: GameSpot
+    url: https://www.gamespot.com/feeds/news/
+    type: rss
+    game: both
+    tier: REPORTED
+    keywords: both
+    enabled: true
+
+  # ---------------- RUMOR (alert only, never drafted) ----------------
+  # Reddit blocks the .json API without a login (403), so the radar reads Reddit's RSS
+  # instead. RSS has no upvote score or flair, so the spec's rule
+  # "score >= 300 or Official/News flair" is done with two feeds per subreddit:
+  #   - "top of the day" (only the 10 most upvoted posts of the day)
+  #   - a flair search (posts with the Official/News flair) - now DISABLED, see below
+  # Reddit allows about 1 request a minute without a login; the radar waits between calls.
+
+  - name: r/GTA6 (top today)
+    url: https://www.reddit.com/r/GTA6/top/.rss?t=day&limit=10
+    type: reddit
+    game: gta6
+    tier: RUMOR
+    enabled: true
+
+  - name: r/GTA6 (News/Official flair)
+    url: https://www.reddit.com/r/GTA6/search.rss?q=flair%3A%22News%22+OR+flair%3A%22Official%22&restrict_sr=1&sort=new&limit=10
+    type: reddit
+    game: gta6
+    tier: RUMOR
+    # DISABLED 2026-11-16: Reddit now blocks search feeds without a login (403 Forbidden,
+    # even when not rate-limited). The "top today" feed above still catches big posts.
+    enabled: false
+
+  - name: r/CallOfDuty (top today)
+    url: https://www.reddit.com/r/CallOfDuty/top/.rss?t=day&limit=10
+    type: reddit
+    game: mw4
+    tier: RUMOR
+    keywords: mw4          # the sub covers every CoD game
+    allow_topics: true
+    enabled: true
+
+  - name: r/CallOfDuty (News/Official flair)
+    url: https://www.reddit.com/r/CallOfDuty/search.rss?q=flair%3A%22News%22+OR+flair%3A%22Official%22&restrict_sr=1&sort=new&limit=10
+    type: reddit
+    game: mw4
+    tier: RUMOR
+    keywords: mw4
+    allow_topics: true
+    # DISABLED 2026-11-16: Reddit now blocks search feeds without a login (403 Forbidden,
+    # even when not rate-limited). The "top today" feed above still catches big posts.
+    enabled: false

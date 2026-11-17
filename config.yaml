@@ -1,0 +1,51 @@
+# Lobby News Radar - settings
+# Times are India time (IST). Edit with Notepad, save, then restart run_radar.bat.
+
+check_every_minutes: 5
+reddit_every_minutes: 10       # Reddit allows very few requests; don't go below 10
+quiet_hours_ist: null          # e.g. ["01:00","05:30"] to make LOW/MEDIUM silent at night
+send_low_priority: false       # LOW only in the daily digest
+digest_time_ist: "21:30"
+brand:
+  handle: "@thelobby.report"
+  bg: "#0B0D10"
+  accent: "#C6FF3D"
+
+# HIGH alerts are NEVER silenced, even in quiet hours (big news drops at night in India).
+
+# Priority words, matched (case-insensitive) on title + summary.
+# A word also matches its longer forms: "delay" matches "delayed", "reveal" matches "revealed".
+# Lines starting with re: are patterns (advanced - leave them as they are).
+# HIGH is checked first, then MEDIUM. Anything else is LOW.
+priority:
+  high:
+    - "trailer"
+    - "release date"
+    - "delay"
+    - "postpone"
+    - "pre-order"
+    - "preorder"
+    - "new season"
+    - "season launch"
+    - 're:season \d+\b(?!\s*reloaded)'   # "Season 1" etc. (season launch) but not "Season 1 Reloaded"
+    - "reveal"
+    - "price"
+    - "new map"
+    - "new mode"
+    - "maps and modes"
+    - 're:\b(maps?|modes?)\b.{0,30}\b(confirmed|announced|revealed|coming)'   # "new map/mode announcement"
+    - "out now"
+    - "live worldwide"
+  medium:
+    - "patch notes"
+    - "event"
+    - "playlist"
+    - "double xp"
+    - "2xp"
+    - "battle pass"
+    - "reloaded"
+    - "update"
+
+# Optional AI captions (only used if ANTHROPIC_API_KEY is in .env)
+ai:
+  model: "claude-opus-5-5"

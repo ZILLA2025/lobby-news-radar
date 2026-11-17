@@ -1,0 +1,2 @@
+Put ONE bold font file (.ttf or .otf) in this folder to use it on the cards.
+If the folder has no font, the radar uses Windows fonts (Segoe UI Black Italic / Arial Bold).
