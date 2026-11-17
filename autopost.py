@@ -803,12 +803,15 @@ class AutoPost:
                     self._update_post(r["id"], status="failed", error="stopped while posting")
                     self.tg.text(f"⚠️ The {self.label(key)} post was interrupted while posting. "
                                  "Check Instagram: if it's not there, post it by hand.")
-            if not (ask_at <= now <= end):
-                continue
+            # A Reel planned for a slot in the next 24 h is sent for approval as soon as it's planned (while the
+            # owner is awake), so the day can be approved ahead - not only at the ask time. It's also offered even
+            # if breaking news came first for that slot.
             planned = self._planned_candidates(key)
-            if planned and now < dt:  # the Reel made for this slot is offered even if breaking news came first
+            if planned and now < dt and (ask_at <= now or (dt - now <= timedelta(hours=24) and not self.asleep())):
                 self._propose_plan(key, planned[0])
                 rows = self.db.execute("SELECT * FROM posts WHERE slot=?", (key,)).fetchall()
+            if not (ask_at <= now <= end):
+                continue
             if not rows:
                 if not self.propose(key):
                     self.db.execute("INSERT INTO posts(slot, kind, status, created_at) VALUES(?,?,?,?)",
