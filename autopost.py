@@ -44,6 +44,7 @@ MEDIA_BRANCH = "media"
 PRIO_RANK = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 NEWS_STATUSES = ("alerted", "digest", "pending")
 ACTIVE = ("proposed", "approved", "publishing", "posted")
+STANDBY = "STANDBY"   # posts.slot for Reels in the standby bank (approved ahead, used if a slot has nothing)
 MAX_PUBLISH_ATTEMPTS = 3
 REFRESH_EVERY = timedelta(days=7)
 AI_MARK = "\n\n----------------------------------------\nAI options"
@@ -69,7 +70,10 @@ HELP = (
     "Before each posting time I send you a post to approve:\n"
     "  ✅ Approve = it goes on Instagram at that time\n"
     "  ⏭ Skip = I show you the next option\n"
-    "Nothing is ever posted without your ✅.\n\n"
+    "  🚀 Post now = it goes on Instagram right away (breaking news)\n"
+    "Nothing is ever posted without your ✅ or 🚀.\n\n"
+    "Standby bank: Reels you approve ahead of time. If a posting time arrives with nothing approved, "
+    "the oldest one goes out, so a posting time is never missed. You get a reminder 30 min before.\n\n"
     "Saturdays 13:00 New York: the week's most-talked-about rumor, labelled RUMOR HEARD.\n\n"
     "Add your own post: send me a photo with the caption written under it.\n"
     "(Tip: send it as a File to keep full quality.)\n\n"
@@ -269,6 +273,12 @@ class Instagram:
     def create(self, ig_id: str, image_url: str, caption: str) -> str:
         return self._req("POST", f"{ig_id}/media", data={"image_url": image_url, "caption": caption})["id"]
 
+    def create_reel(self, ig_id: str, video_url: str, caption: str, cover_url: str = "") -> str:
+        data = {"media_type": "REELS", "video_url": video_url, "caption": caption, "share_to_feed": "true"}
+        if cover_url:
+            data["cover_url"] = cover_url  # the action frame with the headline, never a logo
+        return self._req("POST", f"{ig_id}/media", data=data)["id"]
+
     def wait_ready(self, container: str, max_wait: int = 90) -> None:
         end = time.time() + max_wait
         while True:
@@ -279,7 +289,7 @@ class Instagram:
             if code in ("ERROR", "EXPIRED"):
                 raise IGError(f"Instagram couldn't use the picture ({st.get('status') or code})")
             if time.time() > end:
-                raise IGError("Instagram was still processing the picture after 90 seconds")
+                raise IGError(f"Instagram was still processing it after {max_wait} seconds")
             time.sleep(5)
 
     def publish(self, ig_id: str, container: str) -> str:
@@ -334,6 +344,22 @@ class GitHubHost:
         if not r.ok:
             raise IGError(f"couldn't upload the picture to GitHub (HTTP {r.status_code}: {r.text[:120]})")
         url = f"https://raw.githubusercontent.com/{self.repo}/{MEDIA_BRANCH}/posts/{name}"
+        if name.lower().endswith(".mp4"):
+            # Videos: raw.githubusercontent serves them as application/octet-stream, which Instagram rejects.
+            # GitHub Pages (on the media branch) serves video/mp4; it needs ~1-2 min to publish each push.
+            owner, repo = self.repo.split("/", 1)
+            url = f"https://{owner.lower()}.github.io/{repo}/posts/{name}"
+            for _ in range(36):
+                try:
+                    h = requests.head(url, timeout=15)
+                    if h.status_code == 200 and h.headers.get("content-type", "").startswith("video/"):
+                        break
+                except requests.RequestException:
+                    pass
+                time.sleep(10)
+            else:
+                raise IGError("the video link on GitHub Pages didn't come online within 6 minutes")
+            return url, r.json()["content"]["sha"]
         for _ in range(10):  # wait until the public link works
             try:
                 if requests.head(url, timeout=10).status_code == 200:
@@ -385,6 +411,12 @@ class AutoPost:
         self.db = radar.db
         self.tg = radar.tg
         self.db.executescript(SCHEMA)
+        for sql in ("ALTER TABLE posts ADD COLUMN media_type TEXT", "ALTER TABLE posts ADD COLUMN cover_url TEXT",
+                    "ALTER TABLE posts ADD COLUMN post_now INTEGER DEFAULT 0", "ALTER TABLE posts ADD COLUMN plan_id TEXT"):
+            try:
+                self.db.execute(sql)
+            except Exception:
+                pass  # already there
         self.cfg = APConfig(self.s)
         self.tokens = TokenStore(self)
         self.host = GitHubHost(self.cfg.repo, self.cfg.gh_token)
@@ -441,6 +473,8 @@ class AutoPost:
 
     def label(self, key: str) -> str:
         """'16:00 New York (02:30 IST)' - the posting time, and the same moment in India."""
+        if key == STANDBY:
+            return "the standby bank"
         dt = self.slot_dt(key)
         own = dt.astimezone(self.cfg.tz).strftime("%H:%M")
         if self.cfg.tz_label == "IST":
@@ -545,8 +579,53 @@ class AutoPost:
         caption = (folder / "caption.txt").read_text(encoding="utf-8").split(AI_MARK)[0].strip()
         return ig_ready_jpeg((folder / "card.png").read_bytes(), R.hex_rgb(self.s.bg)), caption
 
+    # ---- planned posts (Reels made ahead for a slot, or for the standby bank)
+    def _plans(self) -> list[dict]:
+        """planned/*.json from the private assets repo (cloud: assets/Official/planned; PC: .asset_sync/planned)."""
+        plans, seen = [], set()
+        for d in (R.ASSETS_DIR / "planned", R.BASE_DIR / ".asset_sync" / "planned"):
+            for f in sorted(d.glob("*.json")) if d.exists() else []:
+                if f.stem in seen:
+                    continue
+                try:
+                    p = json.loads(f.read_text(encoding="utf-8"))
+                    p.setdefault("id", f.stem)
+                    plans.append(p)
+                    seen.add(f.stem)
+                except ValueError:
+                    log.warning("planned post %s is not valid JSON - skipped", f.name)
+        return plans
+
+    def _planned_candidates(self, key: str) -> list[dict]:
+        used = {r[0] for r in self.db.execute("SELECT plan_id FROM posts WHERE plan_id IS NOT NULL")}
+        return [p for p in self._plans() if p.get("slot") == key and p["id"] not in used]
+
+    def propose_standby(self) -> None:
+        """Offer new standby-bank Reels for approval (a couple at a time, never while the owner sleeps)."""
+        if self.asleep():
+            return
+        for p in self._planned_candidates(STANDBY)[:2]:
+            self._propose_plan(STANDBY, p)
+
+    def _propose_plan(self, key: str, p: dict) -> None:
+        label = f"🎬 {p.get('series', 'PLANNED')}: {p.get('title', p['id'])}"
+        cur = self.db.execute(
+            "INSERT INTO posts(slot, kind, caption, image_name, image_url, status, created_at, updated_at,"
+            " media_type, cover_url, plan_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            (key, "planned", p.get("caption", ""), p["id"], p["video_url"] if p.get("media_type") == "REELS" else p["image_url"],
+             "proposed", R.iso(self.now()), R.iso(self.now()), p.get("media_type", "IMAGE"), p.get("cover_url", ""), p["id"]))
+        pid = cur.lastrowid
+        msg_id = self._send_proposal(pid, key, label, p.get("caption", ""),
+                                     p.get("video_url") or p.get("image_url"), p.get("media_type", "IMAGE"))
+        self._update_post(pid, tg_msg=msg_id)
+        log.info("Asked for approval: %s post = planned %s", key, p["id"])
+
     def propose(self, key: str) -> bool:
         """Send the next option for this slot. False when there is nothing (left) to offer."""
+        planned = self._planned_candidates(key)
+        if planned:  # the Reel made for this slot comes first; news/queue after a Skip
+            self._propose_plan(key, planned[0])
+            return True
         order = [("news", self._news_candidates(key)), ("queue", self._queue_candidates(key))]
         if self.is_rumor_slot(key):  # the weekly RUMOR HEARD post comes first, news/queue after a Skip
             order.insert(0, ("rumor", self._rumor_candidates(key)))
@@ -584,17 +663,25 @@ class AutoPost:
                 return True
         return False
 
-    def _send_proposal(self, pid: int, key: str, label: str, caption: str, url: str) -> int | None:
-        t = self.label(key)
-        late = "" if self.now() < self.slot_dt(key) else " (the time has passed: ✅ posts right away)"
-        head = f"🗓 Post for {t}{late}\n{label}\n\n"
-        foot = f"\n\n✅ = post to {self.s.handle} at that time · ⏭ = show the next option"
+    def _send_proposal(self, pid: int, key: str, label: str, caption: str, url: str,
+                       media_type: str = "IMAGE") -> int | None:
+        if key == STANDBY:
+            head = f"🗄 For the STANDBY BANK\n{label}\n\n"
+            foot = ("\n\n✅ = keep it ready: it goes out only if a posting time has nothing approved · "
+                    "⏭ = don't use it · 🚀 = post it now")
+        else:
+            t = self.label(key)
+            late = "" if self.now() < self.slot_dt(key) else " (the time has passed: ✅ posts right away)"
+            head = f"🗓 Post for {t}{late}\n{label}\n\n"
+            foot = f"\n\n✅ = post at {t} · ⏭ = show the next option · 🚀 = post it now"
         room = 1024 - len(head) - len(foot)
         body = caption if len(caption) <= room else caption[: room - 1] + "…"
         buttons = {"inline_keyboard": [[{"text": "✅ Approve", "callback_data": f"ok:{pid}"},
-                                        {"text": "⏭ Skip", "callback_data": f"skip:{pid}"}]]}
-        res = self.tg.api("sendPhoto", {"photo": url, "caption": head + (body or "(no caption)") + foot,
-                                        "reply_markup": json.dumps(buttons)})
+                                        {"text": "⏭ Skip", "callback_data": f"skip:{pid}"}],
+                                       [{"text": "🚀 Post now", "callback_data": f"now:{pid}"}]]}
+        method, field = ("sendVideo", "video") if media_type == "REELS" else ("sendPhoto", "photo")
+        res = self.tg.api(method, {field: url, "caption": head + (body or "(no caption)") + foot,
+                                   "reply_markup": json.dumps(buttons)})
         if res is None:  # Telegram couldn't fetch the link: send the text instead
             res = self.tg.api("sendMessage", {"text": head + url + "\n\n" + (body or "(no caption)") + foot,
                                               "reply_markup": json.dumps(buttons)})
@@ -607,8 +694,12 @@ class AutoPost:
         try:
             ig = self.ig()
             ig_id = self.ig_id(ig)
-            container = ig.create(ig_id, row["image_url"], row["caption"] or "")
-            ig.wait_ready(container)
+            if row["media_type"] == "REELS":
+                container = ig.create_reel(ig_id, row["image_url"], row["caption"] or "", row["cover_url"] or "")
+                ig.wait_ready(container, max_wait=300)  # videos take a while to process
+            else:
+                container = ig.create(ig_id, row["image_url"], row["caption"] or "")
+                ig.wait_ready(container)
             media = ig.publish(ig_id, container)
         except Exception as e:  # IGError, or anything unexpected: never retry blindly forever
             why = str(e) if isinstance(e, IGError) else f"{type(e).__name__}: {e}"
@@ -643,7 +734,7 @@ class AutoPost:
             ask_at, end = self.ask_at(key), dt + timedelta(minutes=self.cfg.late)
             rows = self.db.execute("SELECT * FROM posts WHERE slot=?", (key,)).fetchall()
             for r in rows:
-                if r["status"] == "approved" and now >= dt and r["attempts"] < MAX_PUBLISH_ATTEMPTS:
+                if r["status"] == "approved" and (now >= dt or r["post_now"]) and r["attempts"] < MAX_PUBLISH_ATTEMPTS:
                     self.publish(r)
                 elif r["status"] == "proposed" and now > end:
                     self._update_post(r["id"], status="expired")
@@ -659,11 +750,45 @@ class AutoPost:
                 if not self.propose(key):
                     self.db.execute("INSERT INTO posts(slot, kind, status, created_at) VALUES(?,?,?,?)",
                                     (key, "none", "empty", R.iso(now)))
-                    self.tg.text(f"🗓 {self.label(key)} post: no new news and your queue is empty, so nothing "
-                                 "will be posted for now. If news comes in before then, I'll offer it.\n"
-                                 "Or send me a photo with a caption.", silent=True)
+                    self.tg.text(f"🗓 {self.label(key)} post: nothing planned or new to offer yet. If news comes in "
+                                 "before then I'll offer it; otherwise an approved standby Reel goes out.", silent=True)
             elif rows[-1]["status"] == "empty" and now < dt and not self.asleep():
                 self.propose(key)  # fresh news since the "nothing to post" message: offer it
+
+            rows = self.db.execute("SELECT * FROM posts WHERE slot=?", (key,)).fetchall()
+            settled = any(r["status"] in ("approved", "publishing", "posted") for r in rows)
+            # One reminder 30 minutes before a slot with nothing approved (CLAUDE.md 8.4) - not while asleep.
+            if (not settled and dt - timedelta(minutes=30) <= now < dt and not self.asleep()
+                    and R.meta_get(self.db, f"remind:{key}") is None):
+                R.meta_set(self.db, f"remind:{key}", R.iso(now))
+                bank = self._standby_bank_size()
+                self.tg.text(f"⏰ The {self.label(key)} post isn't approved yet. Tap ✅ on it above"
+                             + (f", or a standby Reel goes out ({bank} in the bank)." if bank else
+                                " - the standby bank is empty, so the slot would stay empty."))
+            # Never miss a posting time: nothing approved when the time comes -> the oldest approved standby Reel.
+            # Only right at the posting time (checks run every 5 min); a standby going out an hour late would
+            # break the 2-hours-between-posts rule, so a slot that's long past is left alone.
+            if not settled and dt <= now <= dt + timedelta(minutes=15):
+                self._use_standby(key, rows)
+
+    def _standby_bank_size(self) -> int:
+        return self.db.execute("SELECT COUNT(*) FROM posts WHERE slot=? AND status='approved'", (STANDBY,)).fetchone()[0]
+
+    def _use_standby(self, key: str, rows) -> None:
+        sb = self.db.execute("SELECT * FROM posts WHERE slot=? AND status='approved' ORDER BY id LIMIT 1",
+                             (STANDBY,)).fetchone()
+        if not sb:
+            return
+        for r in rows:  # whatever was still waiting for this slot can't be approved any more
+            if r["status"] == "proposed":
+                self._update_post(r["id"], status="expired")
+                self._set_buttons(r["tg_msg"], "⌛ Not approved in time - a standby Reel went out")
+                self._drop_news_picture(r)
+        self._update_post(sb["id"], slot=key)
+        log.info("Slot %s had nothing approved: using standby post %s", key, sb["plan_id"])
+        self.tg.text(f"🗄 Nothing was approved for {self.label(key)}, so your approved standby Reel "
+                     f"\"{sb['plan_id']}\" is going out now.", silent=self.asleep())
+        self.publish(self._post(sb["id"]))
 
     def reopen_open_slots(self) -> None:
         """After something is added to the queue: offer it for a slot that currently has nothing planned."""
@@ -703,10 +828,27 @@ class AutoPost:
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Already handled"}, quiet=True)
             return
         key, t = row["slot"], self.label(row["slot"])
-        if self.now() > self.slot_dt(key) + timedelta(minutes=self.cfg.late):
+        if key != STANDBY and self.now() > self.slot_dt(key) + timedelta(minutes=self.cfg.late):
             self._update_post(row["id"], status="expired")
             self._set_buttons(row["tg_msg"], "⌛ Too late - not posted")
             self._drop_news_picture(row)
+            return
+        if action == "now":  # breaking news / "post it now": approval + publish straight away
+            self._update_post(row["id"], status="approved", post_now=1)
+            self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Posting now"}, quiet=True)
+            self._set_buttons(row["tg_msg"], "🚀 Approved · posting now")
+            log.info("Post now: %s post (%s)", key, row["plan_id"] or row["ref"])
+            self.publish(self._post(row["id"]))
+            return
+        if action == "ok" and key == STANDBY:
+            self._update_post(row["id"], status="approved")
+            self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "In the standby bank"}, quiet=True)
+            self._set_buttons(row["tg_msg"], f"✅ In the standby bank ({self._standby_bank_size()} ready)")
+            return
+        if action == "skip" and key == STANDBY:
+            self._update_post(row["id"], status="skipped")
+            self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Not used"}, quiet=True)
+            self._set_buttons(row["tg_msg"], "⏭ Not used")
             return
         if action == "ok":
             self._update_post(row["id"], status="approved")
@@ -848,6 +990,7 @@ def tick(radar: R.Radar) -> None:
             return
         ap.process_updates()
         ap.run_slots()
+        ap.propose_standby()
         ap.tokens.maybe_refresh()
     except Exception:
         log.exception("Auto-posting error (the news radar keeps running)")
