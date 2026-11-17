@@ -219,11 +219,16 @@ class Instagram:
     Both use the same steps: create a media container, wait until it's ready, publish it."""
 
     def __init__(self, token: str, version: str = "", ig_id: str = "") -> None:
+        if not token.startswith("IG"):
+            # CLAUDE.md rule 6: only the Instagram Login API (graph.instagram.com). An EAA... token would
+            # go through graph.facebook.com, so it is refused.
+            raise IGError("this token is not an Instagram-login token (IGAA...). CLAUDE.md rule 6 allows only "
+                          "graph.instagram.com - get an Instagram-login token (README section 10)")
         self.token = token
         self.version = version
         self.ig_id = ig_id
-        self.fb = not token.startswith("IG")
-        self.host = FB_HOST if self.fb else IG_HOST
+        self.fb = False
+        self.host = IG_HOST
 
     def _url(self, path: str) -> str:
         return f"{self.host}/{self.version + '/' if self.version else ''}{path}"

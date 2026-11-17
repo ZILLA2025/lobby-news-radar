@@ -54,22 +54,22 @@ ai:
 # Before each time the Telegram bot sends you a post with Approve / Skip buttons.
 # NOTHING is posted without your Approve. RUMOR items are never offered.
 autopost:
-  enabled: true                # set to false to stop scheduled posts
-  # Posting times in the AUDIENCE's time zone (follows US daylight saving by itself).
-  # 13:00 / 16:00 / 20:00 New York = 18:00 / 21:00 / 01:00 London.
-  timezone: "America/New_York"
-  times: ["13:00", "16:00", "20:00"]
+  # PAUSED until an Instagram-login token (IGAA..., graph.instagram.com) is in .env: CLAUDE.md rule 6.
+  enabled: false
+  # Times from CLAUDE.md section 4 (India time): US evening, US late evening, UK evening + US lunch.
+  timezone: "Asia/Kolkata"
+  times: ["06:00", "08:30", "22:30"]
   ask_minutes_before: 30       # when the bot asks you to approve
   owner_sleep_ist: ["00:00", "06:00"]   # no approval requests while you sleep: they come just before
   late_approval_minutes: 90    # approve up to this long after the time = posted right away
   news_tiers: ["OFFICIAL", "REPORTED"]   # news first; if none, the next post from your queue
   news_max_age_hours: 12       # only news found in the last 12 hours is offered
-  # Once a week the slot below offers the Reddit rumor with the most traction this week, labelled
-  # "RUMOR HEARD" (amber, text-only card, caption says it's NOT confirmed). Skip = normal news/queue.
+  # Weekly "RUMOR HEARD" feed post - OFF: CLAUDE.md rule 2 allows rumors only as a
+  # "Real or fake?" poll, never as a post.
   weekly_rumor:
-    enabled: true
-    day: "Saturday"            # day in the posting time zone (New York)
-    time: "13:00"              # must be one of the times above
+    enabled: false
+    day: "Saturday"
+    time: "08:30"
   github_repo: "ZILLA2025/lobby-news-radar"   # pictures are hosted here so Instagram can fetch them
   instagram_api_version: ""    # leave empty unless told otherwise
   instagram_user_id: "17841416229817413"   # @thelobby.report (from the Meta app dashboard)

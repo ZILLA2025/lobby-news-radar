@@ -931,7 +931,10 @@ def make_draft(item: dict, s: Settings, fonts: Fonts, meta: dict | None = None,
     if photo is not None:
         photo.convert("RGB").save(folder / "source_image.jpg", "JPEG", quality=92)
     else:
-        photo = download_image(meta.get("image") or item.get("image") or "", folder / "source_image.jpg")
+        # CLAUDE.md rule 3: only OFFICIAL press images. An outlet's header image (IGN, GameSpot...) may be
+        # their own design, so REPORTED (and RUMOR) cards are text-only in our own style.
+        if item["tier"] == "OFFICIAL":
+            photo = download_image(meta.get("image") or item.get("image") or "", folder / "source_image.jpg")
 
     d = {
         "folder": folder, "tier": item["tier"], "game": item["game"], "source": item["source"],
