@@ -54,8 +54,8 @@ ai:
 # Before each time the Telegram bot sends you a post with Approve / Skip buttons.
 # NOTHING is posted without your Approve. RUMOR items are never offered.
 autopost:
-  # PAUSED until an Instagram-login token (IGAA..., graph.instagram.com) is in .env: CLAUDE.md rule 6.
-  enabled: false
+  # Instagram-login token (IGAA..., graph.instagram.com only - CLAUDE.md rule 6). Renews itself weekly.
+  enabled: true
   # Times from CLAUDE.md section 4 (India time): US evening, US late evening, UK evening + US lunch.
   timezone: "Asia/Kolkata"
   times: ["06:00", "08:30", "22:30"]

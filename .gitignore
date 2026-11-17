@@ -4,3 +4,4 @@ radar.db-journal
 radar.log*
 drafts/
 __pycache__/
+account_snapshot.json
