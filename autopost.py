@@ -39,6 +39,7 @@ import radar as R
 log = R.log
 
 IG_HOST = "https://graph.instagram.com"
+FB_HOST = "https://graph.facebook.com"
 MEDIA_BRANCH = "media"
 PRIO_RANK = {"HIGH": 0, "MEDIUM": 1, "LOW": 2}
 NEWS_STATUSES = ("alerted", "digest", "pending")
@@ -124,6 +125,7 @@ class APConfig:
         self.tiers = [str(x).upper() for x in (c.get("news_tiers") or ["OFFICIAL", "REPORTED"])]
         self.tiers = [t for t in self.tiers if t != "RUMOR"]  # rumours are never posted
         self.api_version = str(c.get("instagram_api_version") or "").strip()
+        self.ig_user_id = str(c.get("instagram_user_id") or "").strip()
         self.repo = os.getenv("GITHUB_REPOSITORY", "").strip() or str(c.get("github_repo") or "").strip()
         self.gh_token = os.getenv("GITHUB_TOKEN", "").strip()
         self.ig_env_token = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
@@ -176,8 +178,8 @@ class TokenStore:
 
     def maybe_refresh(self) -> None:
         token = self.get()
-        if not token:
-            return
+        if not token.startswith("IG"):
+            return  # only Instagram-login tokens expire; system-user (EAA...) tokens never do
         last = R.from_iso(R.meta_get(self.db, "ig_token_refreshed"))
         if last and R.now_utc() - last < REFRESH_EVERY:
             return
@@ -202,17 +204,29 @@ class TokenStore:
 # --------------------------------------------------------------------------- Instagram API
 
 class Instagram:
-    def __init__(self, token: str, version: str = "") -> None:
+    """Instagram publishing. Two kinds of token work:
+    - IGAA... (Instagram login, 60 days, renewed automatically) -> graph.instagram.com
+    - EAA...  (Unified / Facebook login, e.g. a system-user token that never expires) -> graph.facebook.com
+    Both use the same steps: create a media container, wait until it's ready, publish it."""
+
+    def __init__(self, token: str, version: str = "", ig_id: str = "") -> None:
         self.token = token
         self.version = version
+        self.ig_id = ig_id
+        self.fb = not token.startswith("IG")
+        self.host = FB_HOST if self.fb else IG_HOST
 
     def _url(self, path: str) -> str:
-        return f"{IG_HOST}/{self.version + '/' if self.version else ''}{path}"
+        return f"{self.host}/{self.version + '/' if self.version else ''}{path}"
 
     def _req(self, method: str, path: str, **kw) -> dict:
+        if self.fb:  # graph.facebook.com: token as a parameter
+            kw["params"] = {**kw.get("params", {}), "access_token": self.token}
+            headers = {}
+        else:
+            headers = {"Authorization": f"Bearer {self.token}"}
         try:
-            resp = requests.request(method, self._url(path), headers={"Authorization": f"Bearer {self.token}"},
-                                    timeout=40, **kw)
+            resp = requests.request(method, self._url(path), headers=headers, timeout=40, **kw)
             body = resp.json()
         except (requests.RequestException, ValueError) as e:
             raise IGError(f"network problem ({type(e).__name__})") from e
@@ -225,7 +239,18 @@ class Instagram:
         return body
 
     def me(self) -> dict:
-        return self._req("GET", "me", params={"fields": "user_id,username,account_type"})
+        if not self.fb:
+            return self._req("GET", "me", params={"fields": "user_id,username,account_type"})
+        if self.ig_id:  # system-user tokens have no Instagram "me": ask about the account directly
+            acc = self._req("GET", self.ig_id, params={"fields": "id,username"})
+            return {"user_id": acc.get("id"), "username": acc.get("username"), "account_type": "BUSINESS"}
+        pages = self._req("GET", "me/accounts", params={"fields": "instagram_business_account{id,username}"})
+        for p in pages.get("data", []):
+            acc = p.get("instagram_business_account")
+            if acc:
+                return {"user_id": acc["id"], "username": acc.get("username"), "account_type": "BUSINESS"}
+        raise IGError("couldn't find the Instagram account for this token - put its ID in "
+                      "config.yaml > autopost > instagram_user_id")
 
     def create(self, ig_id: str, image_url: str, caption: str) -> str:
         return self._req("POST", f"{ig_id}/media", data={"image_url": image_url, "caption": caption})["id"]
@@ -267,7 +292,8 @@ class GitHubHost:
         return bool(self.repo and self.token)
 
     def _api(self, method: str, path: str, **kw) -> requests.Response:
-        return requests.request(method, f"https://api.github.com/repos/{self.repo}/{path}", timeout=30,
+        url = f"https://api.github.com/repos/{self.repo}" + (f"/{path}" if path else "")
+        return requests.request(method, url, timeout=30,
                                 headers={"Authorization": f"Bearer {self.token}",
                                          "Accept": "application/vnd.github+json"}, **kw)
 
@@ -371,11 +397,11 @@ class AutoPost:
         return p
 
     def ig(self) -> Instagram:
-        return Instagram(self.tokens.get(), self.cfg.api_version)
+        return Instagram(self.tokens.get(), self.cfg.api_version, self.cfg.ig_user_id)
 
     def ig_id(self, ig: Instagram) -> str:
         if not self._ig_id:
-            self._ig_id = R.meta_get(self.db, "ig_user_id") or ""
+            self._ig_id = self.cfg.ig_user_id or R.meta_get(self.db, "ig_user_id") or ""
             if not self._ig_id:
                 me = ig.me()
                 self._ig_id = str(me.get("user_id") or me.get("id"))
