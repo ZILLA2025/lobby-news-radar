@@ -910,6 +910,7 @@ class AutoPost:
             self._update_post(row["id"], status="approved")
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "In the standby bank"}, quiet=True)
             self._set_buttons(row["tg_msg"], f"✅ In the standby bank ({self._standby_bank_size()} ready)")
+            self.tg.text(f"✅ Added to the standby bank ({self._standby_bank_size()} ready).", silent=True)
             return
         if action == "skip" and key == STANDBY:
             self._update_post(row["id"], status="skipped")
@@ -928,6 +929,7 @@ class AutoPost:
             when = "posting now" if self.now() >= self.slot_dt(key) else f"posts at {t}"
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": f"Approved - {when}"}, quiet=True)
             self._set_buttons(row["tg_msg"], f"✅ Approved · {when}")
+            self.tg.text(f"✅ Approved - {when}.", silent=True)
             log.info("Approved: %s post (%s #%s)", key, row["kind"], row["ref"])
         elif action == "skip":
             self._update_post(row["id"], status="skipped")
@@ -1145,3 +1147,36 @@ def reel_test(radar: R.Radar) -> int:
                                                                  "NOT for posting.\n\n" + caption)[:1024]})
     print("sent" if ok else "Telegram send failed", video_url)
     return 0 if ok else 1
+
+
+def listen(radar: R.Radar, seconds: int) -> None:
+    """Stay connected to Telegram for `seconds` and handle button taps and messages the moment they arrive
+    (long polling), so ✅ / ⏭ / 🚀 respond instantly instead of at the next 5-minute check. Posting times
+    that come up meanwhile are handled too. Never raises."""
+    if seconds <= 0:
+        return
+    try:
+        ap = _get(radar)
+        if not ap.cfg.enabled or ap.problems():
+            return
+        end = time.time() + seconds
+        log.info("Listening for Telegram taps for %d s", seconds)
+        while time.time() < end - 3:
+            wait = int(min(20, end - time.time() - 3))
+            if wait < 1:
+                break
+            offset = int(R.meta_get(ap.db, "tg_offset", "0") or 0)
+            updates = ap.tg.api("getUpdates", {"offset": offset, "timeout": wait,
+                                               "allowed_updates": json.dumps(["message", "callback_query"])}, quiet=True)
+            for upd in updates or []:
+                R.meta_set(ap.db, "tg_offset", upd["update_id"] + 1)
+                try:
+                    if "callback_query" in upd:
+                        ap._on_button(upd["callback_query"])
+                    elif "message" in upd:
+                        ap._on_message(upd["message"])
+                except Exception:
+                    log.exception("Could not handle a Telegram message")
+            ap.run_slots()  # a posting time that arrives while listening goes out on time
+    except Exception:
+        log.exception("Telegram listening stopped (the next check takes over)")

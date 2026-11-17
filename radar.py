@@ -1667,6 +1667,8 @@ def main() -> int:
             maybe_digest(radar)  # no --loop in the cloud, so the daily digest is sent from here
             autopost.tick(radar)  # again, so news found in this run can be offered
             report.tick(radar)    # 24-hour results + the 21:00 IST daily report
+            # until the next check starts: answer Telegram buttons instantly (LISTEN_SECONDS, set in the workflow)
+            autopost.listen(radar, int(os.getenv("LISTEN_SECONDS", "0") or 0))
         print_table(results)
         return 0
     return run_loop(radar)

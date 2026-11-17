@@ -70,6 +70,7 @@ jobs:
           INSTAGRAM_ACCESS_TOKEN: ${{ secrets.INSTAGRAM_ACCESS_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
           MODE: ${{ github.event.inputs.mode }}
+          LISTEN_SECONDS: "200"   # after the check, answer Telegram buttons instantly until the next check
         # only two allowed values - the input never reaches the shell as code
         run: |
           if [ "$MODE" = "reel-test" ]; then python radar.py --reel-test; else python radar.py --once; fi
