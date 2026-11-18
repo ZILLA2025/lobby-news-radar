@@ -928,7 +928,12 @@ class AutoPost:
             if taken and row["kind"] == "planned" and taken["kind"] != "planned" and taken["status"] == "approved":
                 # The Reel made for this posting time owns it: the news approved for it earlier moves on instead.
                 self._update_post(row["id"], status="approved")  # claim the slot first, so the news can't land here
-                nxt = self._next_free_slot(self.slot_dt(key))
+                stale = R.from_iso(taken["created_at"]) < self.now() - timedelta(hours=self.cfg.news_max_age)
+                planned_slots = {p.get("slot") for p in self._plans()}
+                nxt = None if stale else next(
+                    (k for k, dt in self.slots() if dt > self.slot_dt(key) and k not in planned_slots and not
+                     self.db.execute("SELECT 1 FROM posts WHERE slot=? AND status IN ('approved','publishing','posted')"
+                                     " LIMIT 1", (k,)).fetchone()), None)
                 if nxt:
                     self._update_post(taken["id"], slot=nxt)
                     self.tg.text(f"↪️ The news post approved for {t} moved to {self.label(nxt)}, "
@@ -936,8 +941,9 @@ class AutoPost:
                 else:
                     self._update_post(taken["id"], status="skipped")
                     self._set_buttons(taken["tg_msg"], "⏭ Replaced by the planned Reel")
-                    self.tg.text(f"⏭ The news post approved for {t} was dropped: the planned Reel takes that "
-                                 "time and there's no free time after it.", silent=True)
+                    self.tg.text(f"⏭ The news post approved for {t} was dropped: the planned Reel takes that time"
+                                 + (" and the story is too old to move." if stale else
+                                    " and there's no free time after it."), silent=True)
                 taken = None
             if taken:  # one post per posting time: this one moves to the next free time
                 nxt = self._next_free_slot(self.slot_dt(key))
