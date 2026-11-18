@@ -923,8 +923,22 @@ class AutoPost:
             self._set_buttons(row["tg_msg"], "⏭ Not used")
             return
         if action == "ok":
-            taken = self.db.execute("SELECT 1 FROM posts WHERE slot=? AND id!=? AND status IN ('approved','publishing',"
+            taken = self.db.execute("SELECT * FROM posts WHERE slot=? AND id!=? AND status IN ('approved','publishing',"
                                     "'posted') LIMIT 1", (key, row["id"])).fetchone()
+            if taken and row["kind"] == "planned" and taken["kind"] != "planned" and taken["status"] == "approved":
+                # The Reel made for this posting time owns it: the news approved for it earlier moves on instead.
+                self._update_post(row["id"], status="approved")  # claim the slot first, so the news can't land here
+                nxt = self._next_free_slot(self.slot_dt(key))
+                if nxt:
+                    self._update_post(taken["id"], slot=nxt)
+                    self.tg.text(f"↪️ The news post approved for {t} moved to {self.label(nxt)}, "
+                                 "to make room for the Reel planned for that time.", silent=True)
+                else:
+                    self._update_post(taken["id"], status="skipped")
+                    self._set_buttons(taken["tg_msg"], "⏭ Replaced by the planned Reel")
+                    self.tg.text(f"⏭ The news post approved for {t} was dropped: the planned Reel takes that "
+                                 "time and there's no free time after it.", silent=True)
+                taken = None
             if taken:  # one post per posting time: this one moves to the next free time
                 nxt = self._next_free_slot(self.slot_dt(key))
                 if nxt:

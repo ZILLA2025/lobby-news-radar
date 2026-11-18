@@ -94,6 +94,29 @@ class Reporter:
             logged += 1
         return logged
 
+    # ---- early warning: a Reel nobody is being shown
+    def check_zero_views(self) -> int:
+        """A Reel with 0 views 1-3 h after posting isn't being distributed (normal here: 100+). Tell the owner
+        once, so it can be checked in the app (muted audio, a notice, still processing) before anything else."""
+        warned = 0
+        now = R.now_utc()
+        for m in self.media(limit=6):
+            age = now - datetime.strptime(m["timestamp"], "%Y-%m-%dT%H:%M:%S%z")
+            if not timedelta(hours=1) <= age <= timedelta(hours=3) or R.meta_get(self.db, f"zero:{m['id']}"):
+                continue
+            try:
+                data = self.get(f"{m['id']}/insights", metric="views").get("data") or []
+            except RuntimeError:
+                continue
+            if data and data[0]["values"][0]["value"] == 0:
+                R.meta_set(self.db, f"zero:{m['id']}", R.iso(now))
+                self.tg.text(f"⚠️ This Reel has 0 views {int(age.total_seconds() // 3600)} h after posting:\n"
+                             f"{m.get('permalink', '')}\nOur Reels usually have 100+ by now. Open it in the app and check "
+                             "for a muted-audio or copyright notice, or 'still processing'. Tell me what you see "
+                             "before deleting it, so I can fix the cause.")
+                warned += 1
+        return warned
+
     # ---- the report (section 9)
     def report(self, ap) -> str:
         now_ist = R.now_utc().astimezone(R.IST)
@@ -171,6 +194,8 @@ def tick(radar: R.Radar) -> None:
             n = rep.log_24h()
             if n:
                 log.info("Logged 24-hour results for %d post(s)", n)
+            if rep.check_zero_views():
+                log.warning("A Reel has 0 views after an hour - the owner was told")
         now_ist = R.now_utc().astimezone(R.IST)
         today = now_ist.strftime("%Y-%m-%d")
         if (now_ist.hour, now_ist.minute) >= REPORT_TIME and R.meta_get(radar.db, "report_sent") != today:
