@@ -204,7 +204,7 @@ def end_card(spec: dict, s: R.Settings, fonts: R.Fonts, still: Image.Image, path
 # --------------------------------------------------------------------------- automatic news Reels (cloud)
 
 TOPICS = ["lucia", "jason", "vice city", "leonida keys", "grassrivers", "beach", "ambrosia", "port gellhorn",
-          "mount kalaga", "boobie ike", "brian heder", "cal hampton", "drequan", "raul bautista", "real dimez",
+          "mount kalaga", "police", "heist", "robbery", "boobie ike", "brian heder", "cal hampton", "drequan", "raul bautista", "real dimez",
           "hajin", "zodiac", "warzone", "dmz", "x01", "shoot house", "backstab", "killblock", "canyon", "ghost"]
 
 
@@ -247,7 +247,7 @@ def news_spec(item: dict, d: dict, recent: dict | None = None) -> dict | None:
     lib = library()
     if not lib:
         return None
-    recent = recent or {}
+    recent = {} if recent is None else recent  # the same dict: the caller saves what's used here
     game = item["game"]
     text = " " + _re.sub(r"[^a-z0-9 ]+", " ", f"{item['title']} {d.get('summary', '')}".lower()) + " "
     topics = {t for t in TOPICS if f" {t} " in text}
@@ -257,8 +257,8 @@ def news_spec(item: dict, d: dict, recent: dict | None = None) -> dict | None:
     rng = random.Random(item.get("url", item["title"]))
     pool.sort(key=lambda x: (-min(2, len(set(x[1]["tags"]) & topics)), recent.get(x[1]["clip"], ""), rng.random()))
     is_still = lambda x: lib["videos"][x[0]].get("kind") == "still"  # noqa: E731
-    # opener: the most dramatic moving shot ("hero") with sound, preferably one that matches the story
-    moving = [x for x in pool if not is_still(x) and lib["videos"][x[0]].get("audio")]
+    # opener: the most dramatic moving shot ("hero"), preferably one that matches the story
+    moving = [x for x in pool if not is_still(x)]
     opener = next((x for x in moving if "hero" in x[1]["tags"]), None) or \
         next((x for x in moving if "action" in x[1]["tags"]), None) or (moving or pool)[0]
     chosen, total, per, n_still = [opener], opener[1]["dur"], {opener[0]: 1}, 0
@@ -286,13 +286,17 @@ def news_spec(item: dict, d: dict, recent: dict | None = None) -> dict | None:
         shots.append(shot)
         t += sh["dur"]
     label = R.GAME_LABEL.get(game, "")
+    # sound: the opener's own trailer audio if it has one, else the game's least recently used audio bed
+    beds = [v["audio"] for v in lib["videos"].values() if v["game"] == game and v.get("audio")]
+    audio = lib["videos"][opener[0]].get("audio") or min(beds, key=lambda a: (recent.get(a, ""), a))
+    recent[audio] = R.iso(R.now_utc())  # the caller saves 'recent'
     return {
         "game": game, "tier": item["tier"], "source": item["source"],
         "headline": d.get("full_headline") or d["headline"],
         "source_line": f"Reported by {item['source']}" if item["tier"] == "REPORTED" else f"Source: {item['source']}",
         "banner": f"{label} · {'BREAKING' if item.get('priority') == 'HIGH' else 'NEWS'}",
         "question": "Hyped or not?",
-        "audio": {"clip": lib["videos"][opener[0]]["audio"]},
+        "audio": {"clip": audio},
         "shots": shots, "caption": d.get("caption", ""),
         "series": "The Lobby Daily", "title": item["title"][:80],
     }
