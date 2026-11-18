@@ -594,9 +594,14 @@ class AutoPost:
             "published": R.from_iso(row["published"]), "found_at": R.from_iso(row["found_at"]),
         }
         d = R.make_draft(item, self.s, self.radar.fonts)
-        spec = RL.news_spec(item, d)
+        recent = json.loads(R.meta_get(self.db, "reel_recent", "{}") or "{}")
+        spec = RL.news_spec(item, d, recent)
         if not spec:
             return None
+        now = R.iso(self.now())
+        recent.update({sh["clip"]: now for sh in spec["shots"] if sh.get("clip")})
+        recent = dict(sorted(recent.items(), key=lambda kv: kv[1])[-300:])
+        R.meta_set(self.db, "reel_recent", json.dumps(recent))
         name = f"news-{row['id']}-{uuid.uuid4().hex[:8]}"
         path = RL.build_spec(spec, name)
         video_url, _ = self.host.upload(path.read_bytes(), f"{name}.mp4")

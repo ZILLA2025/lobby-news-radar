@@ -19,6 +19,14 @@ import reel  # noqa: E402
 
 WORK = BASE / ".asset_sync"
 AUDIO_SECONDS = 24
+STILL_SECONDS = 1.4
+
+
+def still_files(st: dict) -> list[Path]:
+    """Up to st['max'] stills from a folder, spread evenly over it (not just the first few)."""
+    files = sorted(p for p in (R.ASSETS_DIR / st["dir"]).iterdir() if p.suffix.lower() in (".jpg", ".jpeg", ".png"))
+    n = min(st.get("max", 5), len(files))
+    return [files[round(k * (len(files) - 1) / max(1, n - 1))] for k in range(n)] if n > 1 else files[:n]
 
 
 def main() -> int:
@@ -48,8 +56,23 @@ def main() -> int:
         if not (WORK / arel).exists():
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{v['audio_start']:.3f}", "-t", str(AUDIO_SECONDS),
                             "-i", str(path), "-vn", "-c:a", "aac", "-b:a", "160k", str(WORK / arel)], check=True)
-        out_lib["videos"][key] = {"game": v["game"], "audio": arel, "shots": shots}
+        out_lib["videos"][key] = {"game": v["game"], "audio": arel if v.get("audio", True) else None, "shots": shots}
         print(f"{key}: {len(shots)} shots")
+    # official stills (People / Places folders): each becomes a short vertical clip with a slow zoom
+    for st in src.get("stills", []):
+        files = still_files(st)
+        shots = []
+        for i, img in enumerate(files):
+            rel = f"clips/{st['key']}_{i:02d}.mp4"
+            dest = WORK / rel
+            if not dest.exists():
+                vf = reel.still_vf(img, STILL_SECONDS, st.get("crop", {}).get(img.name), "in" if i % 2 == 0 else "out")
+                subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(img), "-vf", vf + ",format=yuv420p",
+                                "-frames:v", str(round(STILL_SECONDS * reel.FPS)), "-c:v", "libx264", "-preset", "slow",
+                                "-crf", "21", "-pix_fmt", "yuv420p", str(dest)], check=True)
+            shots.append({"clip": rel, "dur": STILL_SECONDS, "tags": st["tags"]})
+        out_lib["videos"][st["key"]] = {"game": st["game"], "kind": "still", "audio": None, "shots": shots}
+        print(f"{st['key']}: {len(shots)} stills")
     (WORK / "reels").mkdir(exist_ok=True)
     (WORK / "reels" / "library.json").write_text(json.dumps(out_lib, indent=1), encoding="utf-8")
     size = sum(f.stat().st_size for f in (WORK / "clips").glob("*")) / 1e6

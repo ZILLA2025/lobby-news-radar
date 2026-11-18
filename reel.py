@@ -76,6 +76,40 @@ def _active_area(path: Path) -> tuple[float, float]:
     return tuple(cache[key])
 
 
+# --------------------------------------------------------------------------- official stills (slow zoom)
+
+STILL_ZOOM = 0.10  # a still zooms 10% over its shot, so it still moves (montage pacing)
+
+
+def still_crop_x(path: Path) -> float:
+    """Where to put the 9:16 window on a landscape still: the busiest (most detailed) part, which on Rockstar
+    art is the character or the landmark, gently pulled toward the centre. 0 = left edge, 1 = right edge."""
+    import numpy as np
+    im = Image.open(path).convert("L")
+    im.thumbnail((640, 640))
+    e = np.asarray(im.filter(ImageFilter.FIND_EDGES), dtype=np.float32).sum(axis=0)
+    w, h = im.size
+    win = max(1, min(w, round(h * 9 / 16)))
+    if win >= w:
+        return 0.5
+    sums = np.convolve(e, np.ones(win), mode="valid")
+    centres = (np.arange(len(sums)) + win / 2) / w
+    score = sums / (sums.max() or 1) * (1 - 0.35 * np.abs(centres - 0.5))
+    return round(float(centres[int(score.argmax())]), 3)
+
+
+def still_vf(path: Path, dur: float, crop_x: float | None = None, zoom: str = "in") -> str:
+    """ffmpeg filter for one still: vertical crop at crop_x, upscaled 2x (smoother zoom), then zoom in or out."""
+    iw, ih = Image.open(path).size
+    cw = min(iw, round(ih * 9 / 16) // 2 * 2)
+    cx = crop_x if crop_x is not None else still_crop_x(path)
+    x0 = min(max(int(iw * cx) - cw // 2, 0), iw - cw)
+    n = max(1, round(dur * FPS))
+    z = f"1+{STILL_ZOOM}*on/{n}" if zoom == "in" else f"{1 + STILL_ZOOM}-{STILL_ZOOM}*on/{n}"
+    return (f"crop={cw}:{ih}:{x0}:0,scale={2 * W}:{2 * H}:flags=lanczos,"
+            f"zoompan=z='{z}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d={n}:s={W}x{H}:fps={FPS},setsar=1")
+
+
 # --------------------------------------------------------------------------- overlays (Pillow, transparent PNG)
 
 def _text(draw, xy, text, font, fill, anchor="ma"):
@@ -169,8 +203,9 @@ def end_card(spec: dict, s: R.Settings, fonts: R.Fonts, still: Image.Image, path
 
 # --------------------------------------------------------------------------- automatic news Reels (cloud)
 
-TOPICS = ["lucia", "jason", "vice city", "leonida keys", "grassrivers", "beach", "hajin", "zodiac", "warzone",
-          "dmz", "x01", "shoot house", "backstab", "killblock", "canyon", "ghost"]
+TOPICS = ["lucia", "jason", "vice city", "leonida keys", "grassrivers", "beach", "ambrosia", "port gellhorn",
+          "mount kalaga", "boobie ike", "brian heder", "cal hampton", "drequan", "raul bautista", "real dimez",
+          "hajin", "zodiac", "warzone", "dmz", "x01", "shoot house", "backstab", "killblock", "canyon", "ghost"]
 
 
 def library() -> dict | None:
@@ -198,14 +233,21 @@ def fact_chunks(summary: str, n: int = 3, width: int = 62) -> list[str]:
     return [c for c in out if len(c) > 3][:n]
 
 
-def news_spec(item: dict, d: dict) -> dict | None:
+MAX_PER_VIDEO, MAX_PER_STILL_SET = 3, 2   # variety: no single trailer may carry a Reel
+MAX_STILLS = 4                            # most of a Reel stays real motion (brief: fast montage)
+
+
+def news_spec(item: dict, d: dict, recent: dict | None = None) -> dict | None:
     """Plan a news Reel from a story: an action opener, then shots that match the story's topic
-    (Hajin story -> Hajin footage), the headline first, the article's facts on later shots, a question."""
+    (Hajin story -> Hajin footage), the headline first, the article's facts on later shots, a question.
+    Variety: at most 3 shots from one video and 2 from one still set, stills never back to back, and shots
+    used recently (recent = {clip: last used ISO time}) go to the back of the line."""
     import random
     import re as _re
     lib = library()
     if not lib:
         return None
+    recent = recent or {}
     game = item["game"]
     text = " " + _re.sub(r"[^a-z0-9 ]+", " ", f"{item['title']} {d.get('summary', '')}".lower()) + " "
     topics = {t for t in TOPICS if f" {t} " in text}
@@ -213,16 +255,29 @@ def news_spec(item: dict, d: dict) -> dict | None:
     if len(pool) < 6:
         return None
     rng = random.Random(item.get("url", item["title"]))
-    pool.sort(key=lambda x: (-len(set(x[1]["tags"]) & topics), rng.random()))
-    # opener: the most dramatic moving shot ("hero"), preferably one that matches the story
-    opener = next((x for x in pool if "hero" in x[1]["tags"]), None) or         next((x for x in pool if "action" in x[1]["tags"]), pool[0])
-    chosen, total = [opener], opener[1]["dur"]
+    pool.sort(key=lambda x: (-min(2, len(set(x[1]["tags"]) & topics)), recent.get(x[1]["clip"], ""), rng.random()))
+    is_still = lambda x: lib["videos"][x[0]].get("kind") == "still"  # noqa: E731
+    # opener: the most dramatic moving shot ("hero") with sound, preferably one that matches the story
+    moving = [x for x in pool if not is_still(x) and lib["videos"][x[0]].get("audio")]
+    opener = next((x for x in moving if "hero" in x[1]["tags"]), None) or \
+        next((x for x in moving if "action" in x[1]["tags"]), None) or (moving or pool)[0]
+    chosen, total, per, n_still = [opener], opener[1]["dur"], {opener[0]: 1}, 0
     for x in pool:
         if total >= 11.5:
             break
-        if x is not opener:
-            chosen.append(x)
-            total += x[1]["dur"]
+        cap = MAX_PER_STILL_SET if is_still(x) else MAX_PER_VIDEO
+        if x is opener or per.get(x[0], 0) >= cap or (is_still(x) and n_still >= MAX_STILLS):
+            continue
+        chosen.append(x)
+        per[x[0]] = per.get(x[0], 0) + 1
+        n_still += is_still(x)
+        total += x[1]["dur"]
+    # order: opener, then moving and still shots alternating (a still never follows a still)
+    mov, stl = [x for x in chosen[1:] if not is_still(x)], [x for x in chosen[1:] if is_still(x)]
+    order = [opener]
+    while mov or stl:
+        order.append(stl.pop(0) if stl and (not is_still(order[-1]) or not mov) else mov.pop(0))
+    chosen = order
     facts, t, shots = fact_chunks(d.get("summary", "")), 0.0, []
     for vk, sh in chosen:
         shot = {"clip": sh["clip"], "dur": sh["dur"]}
@@ -276,11 +331,15 @@ def build_spec(spec: dict, name: str) -> Path:
         if sh.get("caption"):
             caption_overlay(sh["caption"], s, fonts, tmp / f"cap{i}.png")
     last = shots[-1]
-    last_src = _clip_path(last["clip"]) if last.get("clip") else R.ASSETS_DIR / last["file"]
-    last_t = last["dur"] / 2 if last.get("clip") else last["start"] + last["dur"] / 2
-    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{last_t:.2f}", "-i", str(last_src),
-                    "-frames:v", "1", str(tmp / "last.png")], check=True)
-    end_card(spec, s, fonts, Image.open(tmp / "last.png"), tmp / "end.png")
+    if last.get("image"):
+        still = Image.open(R.ASSETS_DIR / last["image"])
+    else:
+        last_src = _clip_path(last["clip"]) if last.get("clip") else R.ASSETS_DIR / last["file"]
+        last_t = last["dur"] / 2 if last.get("clip") else last["start"] + last["dur"] / 2
+        subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{last_t:.2f}", "-i", str(last_src),
+                        "-frames:v", "1", str(tmp / "last.png")], check=True)
+        still = Image.open(tmp / "last.png")
+    end_card(spec, s, fonts, still, tmp / "end.png")
 
     # ffmpeg graph: each shot trimmed + vertical crop, then the end card, concatenated; overlays timed on top
     cmd = ["ffmpeg", "-v", "error", "-y"]
@@ -290,6 +349,13 @@ def build_spec(spec: dict, name: str) -> Path:
             cmd += ["-t", f"{sh['dur']:.3f}", "-i", str(_clip_path(sh["clip"]))]
             filters.append(f"[{i}:v]scale={W}:{H},setsar=1,fps={FPS},trim=duration={sh['dur']:.3f},"
                            f"setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
+            labels.append(f"[v{i}]")
+            continue
+        if sh.get("image"):  # official still with a slow zoom
+            img = R.ASSETS_DIR / sh["image"]
+            cmd += ["-i", str(img)]
+            filters.append(f"[{i}:v]{still_vf(img, sh['dur'], sh.get('crop_x'), sh.get('zoom', 'in'))},"
+                           f"trim=duration={sh['dur']:.3f},setpts=PTS-STARTPTS,format=yuv420p[v{i}]")
             labels.append(f"[v{i}]")
             continue
         src = R.ASSETS_DIR / sh["file"]
