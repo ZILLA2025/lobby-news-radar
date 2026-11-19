@@ -48,8 +48,30 @@ jobs:
           ssh-key: ${{ secrets.ASSETS_DEPLOY_KEY }}
           path: assets/Official
 
+      # ffmpeg: a static build from FFmpeg-Builds/FFmpeg-Builds (formerly BtbN) kept in the Actions cache
+      # (owner OK'd on 2026-11-19; apt-get took 6-12 min on some runs and delayed posts).
+      # Falls back to apt if the download fails.
+      - name: Cached ffmpeg
+        uses: actions/cache@v4
+        with:
+          path: ~/ffmpeg-bin
+          key: ffmpeg-static-n8.1-v1
+
       - name: ffmpeg for Reels
-        run: command -v ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+        run: |
+          if [ ! -x ~/ffmpeg-bin/ffmpeg ]; then
+            mkdir -p ~/ffmpeg-bin
+            curl -fsSL --retry 3 --max-time 180 \
+              https://github.com/FFmpeg-Builds/FFmpeg-Builds/releases/download/latest/ffmpeg-n8.1-latest-linux64-gpl-8.1.tar.xz \
+              | tar -xJ -C ~/ffmpeg-bin --strip-components=2 --wildcards '*/bin/ffmpeg' '*/bin/ffprobe' || true
+          fi
+          if [ -x ~/ffmpeg-bin/ffmpeg ] && ~/ffmpeg-bin/ffmpeg -version >/dev/null 2>&1; then
+            echo "$HOME/ffmpeg-bin" >> "$GITHUB_PATH"
+            ~/ffmpeg-bin/ffmpeg -version | head -1
+          else
+            rm -rf ~/ffmpeg-bin
+            command -v ffmpeg || (sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg)
+          fi
 
       - name: Bold font for the cards
         run: |
