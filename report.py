@@ -21,6 +21,13 @@ MILESTONES = [(7, 250), (14, 1000), (21, 2500), (30, 5000)]
 REEL_METRICS = "views,reach,likes,comments,shares,saved,ig_reels_avg_watch_time,reels_skip_rate"
 FEED_METRICS = "views,reach,likes,comments,shares,saved,follows"
 
+# Content Rewards pays only for Tier 1 + 2 audiences: they must be 70-80%+ of the account, India (Tier 3) under 20%.
+# Approximate tier lists (ISO country codes); anything else counts as Tier 3.
+TIER1 = set("US GB CA AU NZ IE DE FR NL BE LU AT CH SE NO DK FI IS".split())
+TIER2 = set(("ES IT PT GR PL CZ SK HU SI HR EE LV LT RO BG CY MT JP KR SG HK TW IL AE SA QA KW BH OM "
+             "MX BR AR CL UY").split())
+INDIA_MAX, TIER12_MIN = 20.0, 70.0
+
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS follower_history (day TEXT PRIMARY KEY, followers INTEGER, at TEXT);
 CREATE TABLE IF NOT EXISTS results (
@@ -117,6 +124,51 @@ class Reporter:
                 warned += 1
         return warned
 
+    # ---- audience countries (Content Rewards: Tier 1 + 2 >= 70%, India < 20%)
+    def audience_mix(self, metric: str = "follower_demographics") -> dict | None:
+        """{'total', 'india', 'tier12', 'top'} in % from Instagram's country breakdown, or None while the account
+        is under 100 followers (Instagram gives no demographics before that)."""
+        p = dict(metric=metric, period="lifetime", metric_type="total_value", breakdown="country")
+        if metric != "follower_demographics":
+            p["timeframe"] = "this_week"
+        try:
+            me = self.get("me", fields="id")["id"]
+            data = self.get(f"{me}/insights", **p).get("data") or []
+            res = data[0]["total_value"]["breakdowns"][0]["results"] if data else []
+        except (RuntimeError, KeyError, IndexError, TypeError):
+            return None
+        counts = {r["dimension_values"][0]: r["value"] for r in res if r.get("value")}
+        total = sum(counts.values())
+        if not total:
+            return None
+        pct = lambda codes: 100 * sum(v for c, v in counts.items() if c in codes) / total  # noqa: E731
+        top = sorted(counts.items(), key=lambda kv: -kv[1])[:4]
+        return {"total": total, "india": pct({"IN"}), "tier12": pct(TIER1 | TIER2),
+                "top": ", ".join(f"{c} {100 * v / total:.0f}%" for c, v in top)}
+
+    def audience_lines(self) -> list[str]:
+        lines = []
+        for metric, name in (("follower_demographics", "Followers"), ("reached_audience_demographics", "Reached this week")):
+            mix = self.audience_mix(metric)
+            if not mix:
+                continue
+            flag = "⚠️" if mix["india"] >= INDIA_MAX or mix["tier12"] < TIER12_MIN else "✅"
+            lines.append(f"{flag} {name}: Tier 1+2 {mix['tier12']:.0f}% (need {TIER12_MIN:.0f}%+), "
+                         f"India {mix['india']:.0f}% (keep under {INDIA_MAX:.0f}%) · {mix['top']}")
+        return lines or ["🌍 Audience countries: Instagram shows them from 100 followers"]
+
+    def check_audience(self) -> None:
+        """Once a day: alert the owner when India reaches 20% or Tier 1+2 drops under 70% (followers or reach)."""
+        today = R.now_utc().astimezone(R.IST).strftime("%Y-%m-%d")
+        if R.meta_get(self.db, "audience_checked") == today:
+            return
+        R.meta_set(self.db, "audience_checked", today)
+        bad = [ln for ln in self.audience_lines() if ln.startswith("⚠️")]
+        if bad:
+            self.tg.text("🌍 Audience mix is off the Content Rewards target:\n" + "\n".join(bad) +
+                         "\nPost in US/UK hours, keep captions US/UK-focused, and don't share the page in Indian "
+                         "groups or pages. Ask Claude Code for a plan.")
+
     # ---- the report (section 9)
     def report(self, ap) -> str:
         now_ist = R.now_utc().astimezone(R.IST)
@@ -137,6 +189,7 @@ class Reporter:
             behind = [g for d, g in MILESTONES if d <= day_no and n < g]
             if behind:
                 lines.append(f"⚠️ Behind the day-{max(d for d, g in MILESTONES if d <= day_no)} milestone: change the plan")
+        lines += self.audience_lines()
 
         posted = [m for m in self.media(15)
                   if datetime.strptime(m["timestamp"], "%Y-%m-%dT%H:%M:%S%z").astimezone(R.IST).strftime("%Y-%m-%d") == today]
@@ -196,6 +249,7 @@ def tick(radar: R.Radar) -> None:
                 log.info("Logged 24-hour results for %d post(s)", n)
             if rep.check_zero_views():
                 log.warning("A Reel has 0 views after an hour - the owner was told")
+            rep.check_audience()
         now_ist = R.now_utc().astimezone(R.IST)
         today = now_ist.strftime("%Y-%m-%d")
         if (now_ist.hour, now_ist.minute) >= REPORT_TIME and R.meta_get(radar.db, "report_sent") != today:
