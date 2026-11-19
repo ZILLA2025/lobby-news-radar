@@ -473,14 +473,20 @@ class AutoPost:
         return datetime(y, m, dd, hh, mm, tzinfo=self.cfg.tz).astimezone(R.now_utc().tzinfo)
 
     def label(self, key: str) -> str:
-        """'16:00 New York (02:30 IST)' - the posting time, and the same moment in India."""
+        """'08:30 IST · 10:00 PM US East · 3:00 AM UK' - the posting time as the US/UK audience sees it."""
         if key == STANDBY:
             return "the standby bank"
         dt = self.slot_dt(key)
         own = dt.astimezone(self.cfg.tz).strftime("%H:%M")
-        if self.cfg.tz_label == "IST":
-            return f"{own} IST"
-        return f"{own} {self.cfg.tz_label} ({dt.astimezone(R.IST).strftime('%H:%M')} IST)"
+        head = f"{own} IST" if self.cfg.tz_label == "IST" else f"{own} {self.cfg.tz_label}"
+        parts = [head]
+        for zone, name in (("America/New_York", "US East"), ("Europe/London", "UK")):
+            try:
+                t = dt.astimezone(ZoneInfo(zone)).strftime("%I:%M %p").lstrip("0")
+                parts.append(f"{t} {name}")
+            except (ZoneInfoNotFoundError, ValueError):
+                pass
+        return " · ".join(parts)
 
     def _sleep_start_before(self, when: datetime) -> datetime | None:
         """If 'when' is in the owner's sleep hours (India time), the moment that sleep started."""
