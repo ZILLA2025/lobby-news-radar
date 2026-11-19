@@ -603,7 +603,7 @@ class AutoPost:
             import reel as RL
         except Exception:
             return None
-        if not RL.library() or not shutil.which("ffmpeg") or row["tier"] == "RUMOR":
+        if not shutil.which("ffmpeg") or row["tier"] == "RUMOR":
             return None
         item = {
             "source": row["source"], "tier": row["tier"], "game": row["game"], "priority": row["priority"],
@@ -612,15 +612,26 @@ class AutoPost:
         }
         d = R.make_draft(item, self.s, self.radar.fonts)
         recent = json.loads(R.meta_get(self.db, "reel_recent", "{}") or "{}")
-        spec = RL.news_spec(item, d, recent)
-        if not spec:
-            return None
-        now = R.iso(self.now())
-        recent.update({sh["clip"]: now for sh in spec["shots"] if sh.get("clip")})
+        name = f"news-{row['id']}-{uuid.uuid4().hex[:8]}"
+        # "motion" (default since 2026-11-19): our own designed Reel with official stills in framed panels and a
+        # generated music bed. "footage" re-cuts trailer clips - that got the account flagged as unoriginal.
+        style = str((self.s.cfg.get("autopost") or {}).get("reel_style", "motion")).lower()
+        if style == "motion":
+            import motion as MO
+            spec = MO.news_spec(item, d, recent)
+            if not spec:
+                return None
+            render = lambda: MO.render(spec, name)  # noqa: E731
+        else:
+            spec = RL.news_spec(item, d, recent)
+            if not spec:
+                return None
+            now = R.iso(self.now())
+            recent.update({sh["clip"]: now for sh in spec["shots"] if sh.get("clip")})
+            render = lambda: RL.build_spec(spec, name)  # noqa: E731
         recent = dict(sorted(recent.items(), key=lambda kv: kv[1])[-300:])
         R.meta_set(self.db, "reel_recent", json.dumps(recent))
-        name = f"news-{row['id']}-{uuid.uuid4().hex[:8]}"
-        path = RL.build_spec(spec, name)
+        path = render()
         video_url, _ = self.host.upload(path.read_bytes(), f"{name}.mp4")
         cover_url, _ = self.host.upload((path.parent / "cover.jpg").read_bytes(), f"{name}-cover.jpg")
         caption = (d["folder"] / "caption.txt").read_text(encoding="utf-8").split(AI_MARK)[0].strip()

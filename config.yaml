@@ -63,6 +63,9 @@ autopost:
   earlier_times:               # the old schedule, still used up to and including this day
     until: "2026-11-19"
     times: ["06:00", "08:30", "22:30"]
+  # News Reels: "motion" = our own designed Reel (official stills in framed panels, generated music).
+  # "footage" = re-cut trailer clips: got the account flagged as unoriginal on 2026-11-19, don't switch back.
+  reel_style: "motion"
   ask_minutes_before: 30       # when the bot asks you to approve
   owner_sleep_ist: ["00:00", "06:00"]   # no approval requests while you sleep: they come just before
   late_approval_minutes: 90    # approve up to this long after the time = posted right away
