@@ -55,7 +55,7 @@ ai:
 # NOTHING is posted without your Approve. RUMOR items are never offered.
 autopost:
   # Instagram-login token (IGAA..., graph.instagram.com only - CLAUDE.md rule 6). Renews itself weekly.
-  enabled: true
+  enabled: false   # owner stopped all posting on 2026-11-20 (~02:30 IST); set back to true to resume
   # India-asleep schedule (owner, 2026-11-19), in India time, to keep India under 20% of the audience:
   # 00:30 = 2 PM ET / 7 PM UK, 03:30 = 5 PM ET / 10 PM UK, 06:30 = 8 PM ET / 5 PM PT / 1 AM UK.
   timezone: "Asia/Kolkata"
