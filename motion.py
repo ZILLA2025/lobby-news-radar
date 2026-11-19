@@ -521,7 +521,9 @@ def news_spec(item: dict, d: dict, recent: dict | None = None) -> dict | None:
     now = R.iso(R.now_utc())
     recent.update({sc["image"]: now for sc in scenes})
     label = R.GAME_LABEL.get(item["game"], "")
-    qs = QUESTIONS.get(item["game"], ["Hyped or not?"])
+    # "Lucia or Jason?" only fits a story about them (it ended a console-sales Reel on 2026-11-19)
+    qs = [x for x in QUESTIONS.get(item["game"], ["Hyped or not?"])
+          if x != "Lucia or Jason?" or re.search(r"\b(lucia|jason)\b", text, re.I)] or ["Hyped or not?"]
     q = qs[int(hashlib.sha1(item["title"].encode()).hexdigest(), 16) % len(qs)]
     spec = {
         "game": item["game"], "kicker": f"{label} · {'BREAKING' if item.get('priority') == 'HIGH' else 'NEWS'}",

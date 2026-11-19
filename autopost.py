@@ -650,16 +650,36 @@ class AutoPost:
             if key:
                 self._propose_row(key, "news", row, breaking=True)
 
-    def _skip_slots(self) -> set[str]:
-        """Posting times the owner asked to leave empty: skip_slots.json {"slots": ["YYYY-MM-DD HH:MM", ...]} in the
-        private assets repo (cloud: assets/Official; PC: .asset_sync)."""
+    def _skip_file(self, field: str) -> set[str]:
+        """A list from skip_slots.json in the private assets repo (cloud: assets/Official; PC: .asset_sync):
+        "slots": posting times the owner asked to leave empty ("YYYY-MM-DD HH:MM");
+        "drop": posts the owner withdrew after approving them ("news:357", "planned:<plan id>")."""
         out: set[str] = set()
         for f in (R.ASSETS_DIR / "skip_slots.json", R.BASE_DIR / ".asset_sync" / "skip_slots.json"):
             try:
-                out |= {str(s).strip() for s in json.loads(f.read_text(encoding="utf-8")).get("slots", [])}
+                out |= {str(s).strip() for s in json.loads(f.read_text(encoding="utf-8")).get(field, [])}
             except (OSError, ValueError, AttributeError):
                 pass
         return out
+
+    def _skip_slots(self) -> set[str]:
+        return self._skip_file("slots")
+
+    def _drop_listed(self) -> None:
+        """Withdraw the posts on the "drop" list that haven't gone out yet."""
+        for entry in self._skip_file("drop"):
+            kind, _, ref = entry.partition(":")
+            if not kind or not ref:
+                continue
+            col, val = ("plan_id", ref) if kind == "planned" else ("ref", int(ref) if ref.isdigit() else ref)
+            for r in self.db.execute(f"SELECT * FROM posts WHERE kind=? AND {col}=? AND status IN ('approved','proposed')",
+                                     (kind, val)).fetchall():
+                self._update_post(r["id"], status="skipped")
+                self._set_buttons(r["tg_msg"], "🗑 Withdrawn - you asked")
+                self._drop_news_picture(r)
+                log.info("Dropped %s post #%s (%s): on the drop list", r["slot"], r["id"], entry)
+                self.tg.text(f"🗑 Withdrawn as you asked: the {kind} post ({ref}) for {self.label(r['slot'])}.",
+                             silent=True)
 
     def _next_free_slot(self, after: datetime) -> str | None:
         skip = self._skip_slots()
@@ -860,6 +880,7 @@ class AutoPost:
 
     def run_slots(self) -> None:
         self._move_off_schedule()
+        self._drop_listed()
         now = self.now()
         skip = self._skip_slots()
         for key, dt in self.slots():
@@ -878,6 +899,15 @@ class AutoPost:
                 continue
             for r in rows:
                 if r["status"] == "approved" and (now >= dt or r["post_now"]) and r["attempts"] < MAX_PUBLISH_ATTEMPTS:
+                    # One post per posting time (2 h apart, CLAUDE.md 4): never a second one at the same time.
+                    if not r["post_now"] and self.db.execute(
+                            "SELECT 1 FROM posts WHERE slot=? AND id!=? AND status IN ('posted','publishing') LIMIT 1",
+                            (key, r["id"])).fetchone():
+                        self._update_post(r["id"], status="skipped", error="slot already had a post")
+                        self._set_buttons(r["tg_msg"], "⏭ Not posted - this time already had a post")
+                        self.tg.text(f"⏭ A second approved post for {self.label(key)} was not posted: that time "
+                                     "already had one.", silent=self.asleep())
+                        continue
                     self.publish(r)
                 elif r["status"] == "proposed" and now > end:
                     self._update_post(r["id"], status="expired")
@@ -1027,9 +1057,16 @@ class AutoPost:
                 taken = None
             if taken:  # one post per posting time: this one moves to the next free time
                 nxt = self._next_free_slot(self.slot_dt(key))
-                if nxt:
-                    self._update_post(row["id"], slot=nxt)
-                    key, t = nxt, self.label(nxt)
+                if not nxt:  # never two posts at one time: leave it waiting instead
+                    self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"],
+                                                        "text": "That time already has a post"}, quiet=True)
+                    self.tg.text(f"⚠️ {t} already has an approved post and there's no free time after it yet, so "
+                                 "this one is NOT approved. To post this instead, tell me to withdraw the other one.",
+                                 silent=True)
+                    log.info("Not approved: %s already taken, no free slot for post #%s", key, row["id"])
+                    return
+                self._update_post(row["id"], slot=nxt)
+                key, t = nxt, self.label(nxt)
             self._update_post(row["id"], status="approved")
             when = "posting now" if self.now() >= self.slot_dt(key) else f"posts at {t}"
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": f"Approved - {when}"}, quiet=True)

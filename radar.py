@@ -267,7 +267,9 @@ def strip_html(text: str) -> str:
         return ""
     if "<" in text:
         text = BeautifulSoup(text, "html.parser").get_text(" ")
-    return re.sub(r"\s+", " ", text).strip()
+    text = re.sub(r"\s+", " ", text).strip()
+    # WordPress feed footer (Xbox Wire, PlayStation Blog...): "The post <title> appeared first on <site>."
+    return re.sub(r"\s*The post .{1,250}? appeared first on [^.]{1,80}\s*\.?\s*$", "", text).strip()
 
 
 def title_key(title: str) -> str:
