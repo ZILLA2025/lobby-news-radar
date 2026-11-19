@@ -639,9 +639,21 @@ class AutoPost:
             if key:
                 self._propose_row(key, "news", row, breaking=True)
 
+    def _skip_slots(self) -> set[str]:
+        """Posting times the owner asked to leave empty: skip_slots.json {"slots": ["YYYY-MM-DD HH:MM", ...]} in the
+        private assets repo (cloud: assets/Official; PC: .asset_sync)."""
+        out: set[str] = set()
+        for f in (R.ASSETS_DIR / "skip_slots.json", R.BASE_DIR / ".asset_sync" / "skip_slots.json"):
+            try:
+                out |= {str(s).strip() for s in json.loads(f.read_text(encoding="utf-8")).get("slots", [])}
+            except (OSError, ValueError, AttributeError):
+                pass
+        return out
+
     def _next_free_slot(self, after: datetime) -> str | None:
+        skip = self._skip_slots()
         for key, dt in self.slots():
-            if dt > after and not self.db.execute(
+            if dt > after and key not in skip and not self.db.execute(
                     "SELECT 1 FROM posts WHERE slot=? AND status IN ('approved','publishing','posted') LIMIT 1",
                     (key,)).fetchone():
                 return key
@@ -690,6 +702,8 @@ class AutoPost:
 
     def propose(self, key: str) -> bool:
         """Send the next option for this slot. False when there is nothing (left) to offer."""
+        if key in self._skip_slots():
+            return False
         planned = self._planned_candidates(key)
         if planned:  # the Reel made for this slot comes first; news/queue after a Skip
             self._propose_plan(key, planned[0])
@@ -836,9 +850,21 @@ class AutoPost:
     def run_slots(self) -> None:
         self._move_off_schedule()
         now = self.now()
+        skip = self._skip_slots()
         for key, dt in self.slots():
             ask_at, end = self.ask_at(key), dt + timedelta(minutes=self.cfg.late)
             rows = self.db.execute("SELECT * FROM posts WHERE slot=?", (key,)).fetchall()
+            if key in skip:  # the owner asked for no post at this time: cancel what's there, offer nothing
+                for r in rows:
+                    if r["status"] in ("approved", "proposed"):
+                        self._update_post(r["id"], status="skipped")
+                        self._set_buttons(r["tg_msg"], "⏭ Skipped - you asked for no post at this time")
+                        self._drop_news_picture(r)
+                        log.info("Skipped %s post #%s: slot on the skip list", key, r["id"])
+                if R.meta_get(self.db, f"skipnote:{key}") is None and now < end:
+                    R.meta_set(self.db, f"skipnote:{key}", R.iso(now))
+                    self.tg.text(f"⏭ No post at {self.label(key)}, as you asked.", silent=self.asleep())
+                continue
             for r in rows:
                 if r["status"] == "approved" and (now >= dt or r["post_now"]) and r["attempts"] < MAX_PUBLISH_ATTEMPTS:
                     self.publish(r)
@@ -973,7 +999,8 @@ class AutoPost:
                 stale = R.from_iso(taken["created_at"]) < self.now() - timedelta(hours=self.cfg.news_max_age)
                 planned_slots = {p.get("slot") for p in self._plans()}
                 nxt = None if stale else next(
-                    (k for k, dt in self.slots() if dt > self.slot_dt(key) and k not in planned_slots and not
+                    (k for k, dt in self.slots() if dt > self.slot_dt(key) and k not in planned_slots
+                     and k not in self._skip_slots() and not
                      self.db.execute("SELECT 1 FROM posts WHERE slot=? AND status IN ('approved','publishing','posted')"
                                      " LIMIT 1", (k,)).fetchone()), None)
                 if nxt:
