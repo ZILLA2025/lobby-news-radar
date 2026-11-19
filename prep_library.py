@@ -53,7 +53,7 @@ def main() -> int:
                                 str(dest)], check=True)
             shots.append({"clip": rel, "dur": s["dur"], "tags": s["tags"]})
         arel = f"clips/{key}_audio.m4a"
-        if not (WORK / arel).exists():
+        if v.get("audio", True) and not (WORK / arel).exists():  # no copy of audio we never use (licensed songs)
             subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{v['audio_start']:.3f}", "-t", str(AUDIO_SECONDS),
                             "-i", str(path), "-vn", "-c:a", "aac", "-b:a", "160k", str(WORK / arel)], check=True)
         out_lib["videos"][key] = {"game": v["game"], "audio": arel if v.get("audio", True) else None, "shots": shots}
