@@ -204,7 +204,7 @@ class Reporter:
         tomorrow = (now_ist + timedelta(days=1)).strftime("%Y-%m-%d")
         lines.append("\n🗓 Tomorrow:")
         gaps = 0
-        for t in ap.cfg.times:
+        for t in ap.cfg.times_for(tomorrow):
             key = f"{tomorrow} {t}"
             plan = next((p for p in ap._plans() if p.get("slot") == key), None)
             approved = self.db.execute("SELECT 1 FROM posts WHERE slot=? AND status='approved'", (key,)).fetchone()

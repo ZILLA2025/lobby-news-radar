@@ -56,9 +56,13 @@ ai:
 autopost:
   # Instagram-login token (IGAA..., graph.instagram.com only - CLAUDE.md rule 6). Renews itself weekly.
   enabled: true
-  # Times from CLAUDE.md section 4 (India time): US evening, US late evening, UK evening + US lunch.
+  # India-asleep schedule (owner, 2026-11-19), in India time, to keep India under 20% of the audience:
+  # 00:30 = 2 PM ET / 7 PM UK, 03:30 = 5 PM ET / 10 PM UK, 06:30 = 8 PM ET / 5 PM PT / 1 AM UK.
   timezone: "Asia/Kolkata"
-  times: ["06:00", "08:30", "22:30"]
+  times: ["00:30", "03:30", "06:30"]
+  earlier_times:               # the old schedule, still used up to and including this day
+    until: "2026-11-19"
+    times: ["06:00", "08:30", "22:30"]
   ask_minutes_before: 30       # when the bot asks you to approve
   owner_sleep_ist: ["00:00", "06:00"]   # no approval requests while you sleep: they come just before
   late_approval_minutes: 90    # approve up to this long after the time = posted right away

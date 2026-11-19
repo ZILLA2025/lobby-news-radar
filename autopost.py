@@ -121,6 +121,10 @@ class APConfig:
             tz_name, self.tz = "Asia/Kolkata", R.IST
         self.tz_label = {"Asia/Kolkata": "IST"}.get(tz_name, tz_name.split("/")[-1].replace("_", " "))
         self.times = sorted({t for t in (_hhmm(x, "autopost.times") for x in c.get("times") or c.get("times_ist") or []) if t})
+        # The schedule before a change: these times apply up to and including the 'until' day.
+        e = c.get("earlier_times") or {}
+        self.earlier_until = str(e.get("until") or "").strip()
+        self.earlier_times = sorted({t for t in (_hhmm(x, "autopost.earlier_times") for x in e.get("times") or []) if t})
         self.ask_before = max(5, int(c.get("ask_minutes_before", 30)))
         self.late = max(0, int(c.get("late_approval_minutes", 90)))
         self.news_max_age = max(1, int(c.get("news_max_age_hours", 12)))
@@ -145,6 +149,12 @@ class APConfig:
         self.ig_env_token = os.getenv("INSTAGRAM_ACCESS_TOKEN", "").strip()
         _redact(self.gh_token)
         _redact(self.ig_env_token)
+
+    def times_for(self, day: str) -> list[str]:
+        """Posting times for one day ('YYYY-MM-DD' in autopost.timezone)."""
+        if self.earlier_until and self.earlier_times and day <= self.earlier_until:
+            return self.earlier_times
+        return self.times
 
 
 # --------------------------------------------------------------------------- Instagram token
@@ -463,7 +473,8 @@ class AutoPost:
     def slots(self) -> list[tuple[str, datetime]]:
         """(key, time in UTC) for yesterday, today and tomorrow."""
         today = self.now().astimezone(self.cfg.tz).date()
-        keys = [f"{(today + timedelta(days=d)).isoformat()} {t}" for d in (-1, 0, 1) for t in self.cfg.times]
+        days = [(today + timedelta(days=d)).isoformat() for d in (-1, 0, 1)]
+        keys = [f"{day} {t}" for day in days for t in self.cfg.times_for(day)]
         return sorted(((k, self.slot_dt(k)) for k in keys), key=lambda x: x[1])
 
     def slot_dt(self, key: str) -> datetime:
@@ -798,7 +809,32 @@ class AutoPost:
             self.host.delete(row["image_name"], row["image_sha"])
 
     # ---- one pass
+    def _move_off_schedule(self) -> None:
+        """After the posting times change: a post approved for a time that's no longer in the schedule moves to the
+        next posting time (or it would never go out); one still waiting for approval is closed (the new times get
+        their own offers)."""
+        keys = [k for k, _ in self.slots()]
+        if not keys:
+            return
+        rows = self.db.execute("SELECT * FROM posts WHERE status IN ('approved','proposed') AND slot!=? AND slot>=? "
+                               "AND slot<=?", (STANDBY, min(keys), max(keys)[:10] + " 23:59")).fetchall()
+        for r in rows:
+            if r["slot"] in keys:
+                continue
+            if r["status"] == "proposed":
+                self._update_post(r["id"], status="expired")
+                self._set_buttons(r["tg_msg"], "⌛ Posting times changed - not used")
+                self._drop_news_picture(r)
+                continue
+            nxt = self._next_free_slot(self.slot_dt(r["slot"]) - timedelta(seconds=1))
+            if nxt:
+                self._update_post(r["id"], slot=nxt)
+                log.info("Posting times changed: post #%s moved %s -> %s", r["id"], r["slot"], nxt)
+                self.tg.text(f"↪️ Posting times changed: the post approved for {r['slot']} IST now goes out at "
+                             f"{self.label(nxt)}.", silent=True)
+
     def run_slots(self) -> None:
+        self._move_off_schedule()
         now = self.now()
         for key, dt in self.slots():
             ask_at, end = self.ask_at(key), dt + timedelta(minutes=self.cfg.late)
@@ -1061,7 +1097,7 @@ class AutoPost:
     def _status(self) -> None:
         today = self.now().astimezone(self.cfg.tz).date().isoformat()
         lines = [f"🗓 Today's posting times for {self.s.handle}:"]
-        for t in self.cfg.times:
+        for t in self.cfg.times_for(today):
             key = f"{today} {t}"
             t = self.label(key)
             rows = self.db.execute("SELECT status FROM posts WHERE slot=? ORDER BY id", (key,)).fetchall()
