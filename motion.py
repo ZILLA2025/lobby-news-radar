@@ -412,8 +412,9 @@ def _scene_frame(t, i, starts, durs, pics, texts, slabs, mask, stripes, chrome, 
             fim = faded(im, a)
             frame.paste(fim, (x, y + dy), fim)
     if i == 0:  # lime underline that grows under the headline
-        last_y = max(y for _, _, y, _ in texts[0]) if texts[0] else TEXT_Y0
-        d.rectangle((MARGIN, last_y + 128, MARGIN + int(ease(u / 1.2) * 260), last_y + 138), fill=lime)
+        bottom = max(y + im.height for im, _, y, _ in texts[0]) - 22 if texts[0] else TEXT_Y0
+        bottom = min(bottom, TEXT_Y1 + 2)  # never into the source line
+        d.rectangle((MARGIN, bottom, MARGIN + int(ease(u / 1.2) * 260), bottom + 9), fill=lime)
     frame.alpha_composite(chrome)
     # progress bar (story style) over the whole Reel
     d = ImageDraw.Draw(frame)
