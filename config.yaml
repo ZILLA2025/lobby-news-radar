@@ -53,6 +53,11 @@ ai:
 # Scheduled Instagram posts (official Instagram API). See README section 10 for the setup.
 # Before each time the Telegram bot sends you a post with Approve / Skip buttons.
 # NOTHING is posted without your Approve. RUMOR items are never offered.
+# Daily 21:00 IST report, 24-hour results, 0-view and audience-mix alerts on Telegram.
+# Off since 2026-11-20: the owner asked for news only while the account is flagged and posts by hand.
+report:
+  enabled: false
+
 autopost:
   # Instagram-login token (IGAA..., graph.instagram.com only - CLAUDE.md rule 6). Renews itself weekly.
   enabled: false   # owner stopped all posting on 2026-11-20 (~02:30 IST); set back to true to resume

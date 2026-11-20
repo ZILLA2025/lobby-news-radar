@@ -235,6 +235,8 @@ class Reporter:
 def tick(radar: R.Radar) -> None:
     """Never raises. 24 h logging every run; the report once a day after 21:00 IST."""
     try:
+        if not (radar.s.cfg.get("report") or {}).get("enabled", True):  # owner: "only send me news" (2026-11-20)
+            return
         import autopost
         ap = autopost._get(radar)
         token = ap.tokens.get()
