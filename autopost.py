@@ -681,8 +681,16 @@ class AutoPost:
                 self.tg.text(f"🗑 Withdrawn as you asked: the {kind} post ({ref}) for {self.label(r['slot'])}.",
                              silent=True)
 
+    def _planned_slots(self) -> set[str]:
+        """Posting times a planned Reel was made for, unless the owner skipped that Reel."""
+        dropped = {r[0] for r in self.db.execute("SELECT plan_id FROM posts WHERE plan_id IS NOT NULL"
+                                                 " AND status IN ('skipped','failed')")}
+        return {p.get("slot") for p in self._plans() if p.get("slot") and p["id"] not in dropped}
+
     def _next_free_slot(self, after: datetime) -> str | None:
-        skip = self._skip_slots()
+        """The next posting time with nothing approved, posting or posted on it, that isn't left empty
+        on purpose and isn't kept for a planned Reel (news must never take the Reel's time)."""
+        skip = self._skip_slots() | self._planned_slots()
         for key, dt in self.slots():
             if dt > after and key not in skip and not self.db.execute(
                     "SELECT 1 FROM posts WHERE slot=? AND status IN ('approved','publishing','posted') LIMIT 1",
@@ -1037,13 +1045,11 @@ class AutoPost:
             if taken and row["kind"] == "planned" and taken["kind"] != "planned" and taken["status"] == "approved":
                 # The Reel made for this posting time owns it: the news approved for it earlier moves on instead.
                 self._update_post(row["id"], status="approved")  # claim the slot first, so the news can't land here
-                stale = R.from_iso(taken["created_at"]) < self.now() - timedelta(hours=self.cfg.news_max_age)
-                planned_slots = {p.get("slot") for p in self._plans()}
-                nxt = None if stale else next(
-                    (k for k, dt in self.slots() if dt > self.slot_dt(key) and k not in planned_slots
-                     and k not in self._skip_slots() and not
-                     self.db.execute("SELECT 1 FROM posts WHERE slot=? AND status IN ('approved','publishing','posted')"
-                                     " LIMIT 1", (k,)).fetchone()), None)
+                nxt = self._next_free_slot(self.slot_dt(key))
+                # too old by the time it would go out = dropped, not moved (news_max_age_hours)
+                stale = R.from_iso(taken["created_at"]) < (self.slot_dt(nxt) if nxt else self.now())                     - timedelta(hours=self.cfg.news_max_age)
+                if stale:
+                    nxt = None
                 if nxt:
                     self._update_post(taken["id"], slot=nxt)
                     self.tg.text(f"↪️ The news post approved for {t} moved to {self.label(nxt)}, "
