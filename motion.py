@@ -330,7 +330,7 @@ def render(spec: dict, name: str) -> Path:
         q_lay = layout(q_words, fonts, (MARGIN, 1180, W - MARGIN, 1400), range(120, 60, -6), 2, 1.0)
     else:
         q_lay = layout(q_words, fonts, (MARGIN, TEXT_Y0 - 30, W - MARGIN, TEXT_Y1 - 40), range(130, 60, -6), 2, 1.0)
-    sub = word_img("COMMENT YOUR ANSWER", fonts.get("headline", 44), WHITE)
+    sub = word_img(spec.get("end_sub", "COMMENT YOUR ANSWER"), fonts.get("headline", 44), WHITE)
 
     # music
     wav = tmp / "music.wav"
