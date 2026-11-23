@@ -535,13 +535,26 @@ class AutoPost:
     def _post(self, pid: int):
         return self.db.execute("SELECT * FROM posts WHERE id=?", (pid,)).fetchone()
 
-    def _set_buttons(self, msg_id: int | None, label: str) -> None:
+    def _set_buttons(self, msg_id: int | None, label: str, undo_pid: int | None = None) -> None:
+        """Replace the buttons with a status label. undo_pid adds an "↩️ Undo" button under it
+        (approved posts only: it puts the post back to waiting for a decision)."""
         if not msg_id:
             return
-        self.tg.api("editMessageReplyMarkup", {
-            "message_id": msg_id,
-            "reply_markup": json.dumps({"inline_keyboard": [[{"text": label, "callback_data": "noop"}]]}),
-        }, quiet=True)
+        rows = [[{"text": label, "callback_data": "noop"}]]
+        if undo_pid:
+            rows.append([{"text": "↩️ Undo", "callback_data": f"undo:{undo_pid}"}])
+        self._set_keyboard(msg_id, {"inline_keyboard": rows})
+
+    def _set_keyboard(self, msg_id: int | None, keyboard: dict) -> None:
+        if msg_id:
+            self.tg.api("editMessageReplyMarkup", {"message_id": msg_id, "reply_markup": json.dumps(keyboard)},
+                        quiet=True)
+
+    @staticmethod
+    def _proposal_buttons(pid: int) -> dict:
+        return {"inline_keyboard": [[{"text": "✅ Approve", "callback_data": f"ok:{pid}"},
+                                     {"text": "⏭ Skip", "callback_data": f"skip:{pid}"}],
+                                    [{"text": "🚀 Post now", "callback_data": f"now:{pid}"}]]}
 
     # ---- candidates
     def _news_candidates(self, key: str) -> list:
@@ -810,9 +823,7 @@ class AutoPost:
             foot = f"\n\n✅ = post at {t} · ⏭ = show the next option · 🚀 = post it now"
         room = 1024 - len(head) - len(foot)
         body = caption if len(caption) <= room else caption[: room - 1] + "…"
-        buttons = {"inline_keyboard": [[{"text": "✅ Approve", "callback_data": f"ok:{pid}"},
-                                        {"text": "⏭ Skip", "callback_data": f"skip:{pid}"}],
-                                       [{"text": "🚀 Post now", "callback_data": f"now:{pid}"}]]}
+        buttons = self._proposal_buttons(pid)
         method, field = ("sendVideo", "video") if media_type == "REELS" else ("sendPhoto", "photo")
         res = self.tg.api(method, {field: url, "caption": head + (body or "(no caption)") + foot,
                                    "reply_markup": json.dumps(buttons)})
@@ -1012,6 +1023,9 @@ class AutoPost:
         data = cq.get("data") or ""
         action, _, pid = data.partition(":")
         row = self._post(int(pid)) if pid.isdigit() else None
+        if action == "undo" and row:
+            self._undo_approval(cq, row)
+            return
         if not row or row["status"] != "proposed":
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "Already handled"}, quiet=True)
             return
@@ -1031,7 +1045,8 @@ class AutoPost:
         if action == "ok" and key == STANDBY:
             self._update_post(row["id"], status="approved")
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": "In the standby bank"}, quiet=True)
-            self._set_buttons(row["tg_msg"], f"✅ In the standby bank ({self._standby_bank_size()} ready)")
+            self._set_buttons(row["tg_msg"], f"✅ In the standby bank ({self._standby_bank_size()} ready)",
+                              undo_pid=row["id"])
             self.tg.text(f"✅ Added to the standby bank ({self._standby_bank_size()} ready).", silent=True)
             return
         if action == "skip" and key == STANDBY:
@@ -1047,7 +1062,8 @@ class AutoPost:
                 self._update_post(row["id"], status="approved")  # claim the slot first, so the news can't land here
                 nxt = self._next_free_slot(self.slot_dt(key))
                 # too old by the time it would go out = dropped, not moved (news_max_age_hours)
-                stale = R.from_iso(taken["created_at"]) < (self.slot_dt(nxt) if nxt else self.now())                     - timedelta(hours=self.cfg.news_max_age)
+                go_time = self.slot_dt(nxt) if nxt else self.now()
+                stale = R.from_iso(taken["created_at"]) < go_time - timedelta(hours=self.cfg.news_max_age)
                 if stale:
                     nxt = None
                 if nxt:
@@ -1076,7 +1092,7 @@ class AutoPost:
             self._update_post(row["id"], status="approved")
             when = "posting now" if self.now() >= self.slot_dt(key) else f"posts at {t}"
             self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": f"Approved - {when}"}, quiet=True)
-            self._set_buttons(row["tg_msg"], f"✅ Approved · {when}")
+            self._set_buttons(row["tg_msg"], f"✅ Approved · {when}", undo_pid=row["id"])
             self.tg.text(f"✅ Approved - {when}.", silent=True)
             log.info("Approved: %s post (%s #%s)", key, row["kind"], row["ref"])
         elif action == "skip":
@@ -1087,6 +1103,28 @@ class AutoPost:
             if not self.propose(key):
                 self.tg.text(f"No more options for {t}, so nothing will be posted then.\n"
                              "Send me a photo with a caption and I'll offer it.", silent=True)
+
+    def _undo_approval(self, cq: dict, row) -> None:
+        """↩️ Undo on an approved post: back to waiting for a decision, with Approve / Skip / Post now again.
+        Only before it starts publishing; a post that's already live has to be deleted in the Instagram app."""
+        def answer(text: str) -> None:
+            self.tg.api("answerCallbackQuery", {"callback_query_id": cq["id"], "text": text}, quiet=True)
+        if row["status"] in ("publishing", "posted"):
+            answer("Too late: it's already posting")
+            self._set_buttons(row["tg_msg"], "📤 Already posted" if row["status"] == "posted" else "📤 Posting…")
+            self.tg.text("↩️ Can't undo: that post is already going out. If you don't want it, delete it in the "
+                         "Instagram app.", silent=True)
+            return
+        if row["status"] != "approved":
+            answer("Already handled")
+            return
+        self._update_post(row["id"], status="proposed", post_now=0)
+        t = self.label(row["slot"]) if row["slot"] != STANDBY else "the standby bank"
+        answer("Approval undone")
+        self._set_keyboard(row["tg_msg"], self._proposal_buttons(row["id"]))
+        self.tg.text(f"↩️ Approval undone: the post for {t} is waiting again. Tap ✅ to approve it or ⏭ to skip it."
+                     " If you do nothing, nothing posts.", silent=True)
+        log.info("Approval undone: %s post #%s (%s)", row["slot"], row["id"], row["plan_id"] or row["ref"])
 
     def _on_message(self, msg: dict) -> None:
         if not self._is_owner(msg.get("chat")):
