@@ -521,7 +521,9 @@ class AutoPost:
     def ask_at(self, key: str) -> datetime:
         """ask_minutes_before the slot - or, if that's while the owner sleeps, 15 min before they go to sleep."""
         ask = self.slot_dt(key) - timedelta(minutes=self.cfg.ask_before)
-        start = self._sleep_start_before(ask)
+        # An ask at the very minute the owner wakes (06:30 slot - 30 min = 06:00) counts as during sleep:
+        # both night posts are asked at 23:45 (CLAUDE.md 4), not at 06:00 when the owner may still be asleep.
+        start = self._sleep_start_before(ask) or self._sleep_start_before(ask - timedelta(minutes=1))
         return start - timedelta(minutes=15) if start else ask
 
     def in_window(self, key: str) -> bool:
