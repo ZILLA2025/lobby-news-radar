@@ -174,6 +174,8 @@ MIGRATIONS = [
     "ALTER TABLE items ADD COLUMN summary TEXT",
     # RUMOR items: points for ranking high in Reddit's "top today" lists, every time they're seen there
     "ALTER TABLE items ADD COLUMN traction INTEGER DEFAULT 0",
+    # the story's own pictures from the feed (JSON list of URLs), for news Reels (owner, 2026-11-25)
+    "ALTER TABLE items ADD COLUMN images TEXT",
 ]
 # status: seen (first-run baseline) | filtered (no keyword match) | duplicate (same title as
 # an earlier item) | pending (new, alert not delivered yet) | alerted | digest (LOW, waits for
@@ -222,13 +224,14 @@ def save_item(db, item: dict, status: str) -> int | None:
             return None
         cur = db.execute(
             "INSERT INTO items(source, tier, game, priority, title, url, published, found_at, status,"
-            " url_key, title_key, summary) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)",
+            " url_key, title_key, summary, images) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 item["source"], item["tier"], item.get("game"), item.get("priority"), item["title"],
                 item["url"], iso(item.get("published")), iso(item["found_at"]), status,
                 item["url_key"], item["title_key"],
                 # kept for new items only, so a scheduled post can rebuild the card later
                 (item.get("summary") or "")[:3000] if status == "pending" else None,
+                json.dumps(feed_images(item)) if status == "pending" else None,
             ),
         )
         db.execute("COMMIT")
@@ -545,8 +548,19 @@ def parse_feed(src: dict, content: bytes) -> list[dict]:
             if e.get(key):
                 image = e[key][0].get("url")
                 break
-        items.append({"title": title, "url": link, "published": published, "summary": summary, "image": image})
+        # Feeds that carry the whole article (GameSpot) include its <figure> pictures. Article pages themselves
+        # often refuse automated requests (403), so the feed is where the story's own pictures come from.
+        raw = " ".join(c.get("value", "") for c in (e.get("content") or [])) or e.get("summary", "") or ""
+        images = article_images(BeautifulSoup(raw, "html.parser"), link, skip=image or "") if "<figure" in raw else []
+        items.append({"title": title, "url": link, "published": published, "summary": summary, "image": image,
+                      "images": images})
     return items
+
+
+def feed_images(item: dict) -> list[str]:
+    """The story's pictures known from the feed: its main image first, then the article's figures."""
+    out = [item["image"]] if item.get("image") else []
+    return out + [u for u in item.get("images") or [] if u not in out]
 
 
 def parse_page(src: dict, html_text: str, base_url: str) -> list[dict]:
@@ -584,7 +598,7 @@ def fetch_source(src: dict, wait_ok: bool = True) -> list[dict]:
 
 def fetch_article_meta(url: str) -> dict:
     """og:title / og:description / og:image + some body text from the article page."""
-    meta = {"title": "", "description": "", "image": "", "body": ""}
+    meta = {"title": "", "description": "", "image": "", "images": [], "body": ""}
     try:
         resp = http_get(url, reddit="reddit.com" in url)
     except Exception as e:
@@ -603,9 +617,35 @@ def fetch_article_meta(url: str) -> dict:
     meta["description"] = strip_html(og("og:description", "twitter:description", "description"))
     image = og("og:image", "og:image:url", "twitter:image")
     meta["image"] = urljoin(resp.url, image) if image else ""
+    meta["images"] = article_images(soup, resp.url, skip=meta["image"])
     paragraphs = [p.get_text(" ", strip=True) for p in soup.find_all("p")]
     meta["body"] = "\n".join(p for p in paragraphs if len(p) > 40)[:5000]
     return meta
+
+
+def article_images(soup, base: str, skip: str = "", limit: int = 4) -> list[str]:
+    """The story's own pictures: images in the article's <figure>s (not avatars, logos or box art), large size."""
+    urls, seen = [], {skip.split("?")[0]} if skip else set()
+    for fig in soup.find_all("figure"):
+        img = fig.find("img")
+        if img is None:
+            continue
+        src = (img.get("data-src") or img.get("src") or "").strip()
+        if not src or src.startswith("data:") or re.search(r"avatar|gravatar|logo|icon|sprite|badge|/box/", src, re.I):
+            continue
+        try:
+            if 0 < int(img.get("width") or 0) < 400:
+                continue
+        except ValueError:
+            pass
+        src = re.sub(r"([?&])w=\d+", r"\g<1>w=1280", urljoin(base, src))  # WordPress sizes: ask for a large copy
+        if src.split("?")[0] in seen:
+            continue
+        seen.add(src.split("?")[0])
+        urls.append(src)
+        if len(urls) >= limit:
+            break
+    return urls
 
 
 # --------------------------------------------------------------------------- matching
@@ -619,6 +659,8 @@ def match_game(src: dict, item: dict, keywords: dict) -> str | None:
     best, best_hits = None, 0
     for game in wanted:
         kw = keywords.get(game) or {}
+        if only_compared(item["title"], kw.get("names")):
+            continue  # "Just Like GTA 6, The Witcher 4 Has A PlayStation Deal" is Witcher news (2026-11-25)
         hits = len(contains_any(text, kw.get("names")))
         if not hits and src.get("allow_topics"):
             if contains_any(text, kw.get("topics")) and not contains_any(text, kw.get("exclude")):
@@ -626,6 +668,22 @@ def match_game(src: dict, item: dict, keywords: dict) -> str | None:
         if hits > best_hits:
             best, best_hits = game, hits
     return best
+
+
+_COMPARED_BEFORE = re.compile(r"\b(?:like|unlike|than|vs\.?|versus|rivals?|inspired\s+by|similar\s+to)\s+(?:the\s+)?$", re.I)
+_COMPARED_AFTER = re.compile(r"^(?:-|\s)?(?:style|like|esque|inspired)\b", re.I)
+
+
+def only_compared(title: str, names) -> bool:
+    """True when the title names the game only as a comparison ('Just like GTA 6, ...', 'a GTA 6-style game'):
+    the story is about another game."""
+    hits = []
+    for w in names or []:
+        w = str(w)
+        rx = re.compile(w[3:], re.I) if w.startswith("re:") else kw_regex(w)
+        hits += list(rx.finditer(title or ""))
+    return bool(hits) and all(_COMPARED_BEFORE.search(title[:m.start()]) or _COMPARED_AFTER.search(title[m.end():])
+                              for m in hits)
 
 
 def priority_of(item: dict, prio_cfg: dict) -> str:
@@ -1070,7 +1128,8 @@ def build_caption(d: dict) -> str:
     first = f"{headline} {d['summary']}".strip()
     if d["tier"] == "REPORTED":
         first = f"Reported by {d['source']}: {first}"
-    return f"{first}\n\nSource: {d['source']}\nWhat do you think? 👇\n\n{HASHTAGS[d['game']]}\n"
+    credit = f"Source: {d['source']}" + (f" · Images: {d['image_credit']}" if d.get("image_credit") else "")
+    return f"{first}\n\n{credit}\nWhat do you think? 👇\n\n{HASHTAGS[d['game']]}\n"
 
 
 def make_draft(item: dict, s: Settings, fonts: Fonts, meta: dict | None = None,
@@ -1094,14 +1153,22 @@ def make_draft(item: dict, s: Settings, fonts: Fonts, meta: dict | None = None,
         n += 1
     folder.mkdir(parents=True)
 
-    photo = photo_override
+    photo, source_images, image_credit = photo_override, [], ""
     if photo is not None:
         photo.convert("RGB").save(folder / "source_image.jpg", "JPEG", quality=92)
     else:
-        # CLAUDE.md rule 3: only OFFICIAL press images. An outlet's header image (IGN, GameSpot...) may be
-        # their own design, so REPORTED (and RUMOR) cards are text-only in our own style.
-        if item["tier"] == "OFFICIAL":
-            photo = download_image(meta.get("image") or item.get("image") or "", folder / "source_image.jpg")
+        # The story's own pictures, credited to the source (owner, 2026-11-25: stock stills didn't match the
+        # news; "take the picture from the source and give them the credit"). Never for rumours (rule 2).
+        if item["tier"] in ("OFFICIAL", "REPORTED"):
+            page = ([meta["image"]] if meta.get("image") else []) + list(meta.get("images") or [])
+            for k, url in enumerate((page or feed_images(item))[:5], start=1):  # page refused (403): the feed's
+                dest = folder / ("source_image.jpg" if k == 1 else f"source_image_{k}.jpg")
+                got = download_image(url, dest)
+                if got is not None:
+                    source_images.append(dest)
+                    photo = got if photo is None else photo
+            if source_images:
+                image_credit = item["source"]
         if photo is None and item["tier"] != "RUMOR":
             # No official article image: use the owner's official art that fits the story.
             picked = pick_official_asset(item, f"{title} {description}")
@@ -1117,6 +1184,7 @@ def make_draft(item: dict, s: Settings, fonts: Fonts, meta: dict | None = None,
         "full_headline": strip_unrenderable(clean_title(title)) if len(clean_title(title)) <= 110 else make_headline(title),
         "caption_headline": sentence_case(shorten_title(title)),
         "summary": summary, "time_label": time_label(item.get("published"), found),
+        "image_credit": image_credit, "source_images": [str(p) for p in source_images],
     }
     render("card", folder / "card.png", d, s, fonts, photo)
     render("story", folder / "story.png", d, s, fonts, photo)
@@ -1128,7 +1196,7 @@ def make_draft(item: dict, s: Settings, fonts: Fonts, meta: dict | None = None,
         f"Priority: {item.get('priority', '')}\n"
         f"Published: {fmt_ist(pub) + ' (' + iso(pub) + ')' if pub else 'unknown'}\n"
         f"Found: {fmt_ist(found)} ({iso(found)})\n"
-        f"Image: {'source_image.jpg (og:image from the article)' if photo is not None else 'none found'}\n",
+        f"Image: {', '.join(p.name for p in source_images) + ' (from the article, credited)' if source_images else ('official asset / override' if photo is not None else 'none found')}\n",
         encoding="utf-8",
     )
     d["meta"] = meta

@@ -509,13 +509,17 @@ def news_spec(item: dict, d: dict, recent: dict | None = None) -> dict | None:
     recent = {} if recent is None else recent
     facts = RL.fact_chunks(d.get("summary", ""), n=3, width=80)
     text = f"{item['title']} {d.get('summary', '')}"
-    imgs = pick_images(item, text, 1 + max(2, len(facts)), recent)
-    if len(imgs) < 2:
+    own = d.get("source_images") or []  # the story's own pictures, credited (owner, 2026-11-25)
+    imgs = own or pick_images(item, text, 1 + max(2, len(facts)), recent)
+    if len(imgs) < (1 if own else 2):
         return None
     fact_dur = max(FACT_DUR, min(3.4, (12.4 - HEAD_DUR - END_DUR) / max(1, len(facts))))
     scenes = [{"image": imgs[0]}]
     for k, f in enumerate(facts):
-        scenes.append({"image": imgs[(k + 1) % len(imgs)], "text": f, "big": big_label(f)})
+        sc = {"image": imgs[(k + 1) % len(imgs)], "text": f, "big": big_label(f)}
+        if len(imgs) < len(facts) + 1:  # fewer pictures than scenes: show a different part of the same one
+            sc["focus"] = (0.25, 0.75, 0.5)[k % 3]
+        scenes.append(sc)
     if not facts:  # nothing to show but the headline: hold it longer
         scenes[0]["dur"] = 5.0
     now = R.iso(R.now_utc())
@@ -528,7 +532,8 @@ def news_spec(item: dict, d: dict, recent: dict | None = None) -> dict | None:
     spec = {
         "game": item["game"], "kicker": f"{label} · {'BREAKING' if item.get('priority') == 'HIGH' else 'NEWS'}",
         "headline": d.get("full_headline") or d["headline"],
-        "source_line": f"Reported by {item['source']}" if item["tier"] == "REPORTED" else f"Source: {item['source']}",
+        "source_line": (f"Reported by {item['source']}" if item["tier"] == "REPORTED" else f"Source: {item['source']}")
+                       + (f" · Images: {d['image_credit']}" if own and d.get("image_credit") else ""),
         "scenes": scenes, "fact_dur": round(fact_dur, 2), "question": q,
         "caption": d.get("caption", ""), "series": "The Lobby Daily", "title": item["title"][:80],
     }

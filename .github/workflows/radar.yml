@@ -114,7 +114,7 @@ jobs:
           # our cards only - not the copies of official stills (this repo and its artifacts are public)
           path: |
             drafts/
-            !drafts/**/source_image.jpg
+            !drafts/**/source_image*.jpg
           retention-days: 3
 
   # GitHub pauses scheduled workflows in public repos after 60 days without a commit.

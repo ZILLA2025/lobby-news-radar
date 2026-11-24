@@ -624,6 +624,8 @@ class AutoPost:
             "source": row["source"], "tier": row["tier"], "game": row["game"], "priority": row["priority"],
             "title": row["title"], "url": row["url"], "summary": row["summary"] or "",
             "published": R.from_iso(row["published"]), "found_at": R.from_iso(row["found_at"]),
+            # the story's own pictures from the feed, for when the article page refuses us (403)
+            "images": json.loads(row["images"] or "[]") if "images" in row.keys() else [],
         }
         d = R.make_draft(item, self.s, self.radar.fonts)
         recent = json.loads(R.meta_get(self.db, "reel_recent", "{}") or "{}")
