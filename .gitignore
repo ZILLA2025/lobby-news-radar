@@ -17,3 +17,6 @@ assets/Official/
 assets/TheLobbyReport_Kit/
 .asset_sync/
 reels/
+
+# Owner's own game captures for Reels (never public)
+assets/Captures/
