@@ -559,7 +559,8 @@ def parse_feed(src: dict, content: bytes) -> list[dict]:
 
 def feed_images(item: dict) -> list[str]:
     """The story's pictures known from the feed: its main image first, then the article's figures."""
-    out = [item["image"]] if item.get("image") else []
+    # feed thumbnails come small (GameSpot: ?w=300, under the 400 px minimum): ask for a large copy
+    out = [re.sub(r"([?&])w=\d+", r"\g<1>w=1280", item["image"])] if item.get("image") else []
     return out + [u for u in item.get("images") or [] if u not in out]
 
 
